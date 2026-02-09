@@ -151,7 +151,7 @@ def main():
     index = create_faiss_index(total_vectors, args.dim, args.threads, NUM_VECTORS_PER_BATCH)
     
     # Define the index file path.
-    index_filename = f"{args.output_dir}/{args.index_size}_faiss_ivf_index_nlist_16k.faiss"
+    index_filename = f"{args.output_dir}/ivf_{args.index_size}_sq8.faiss"
     
     # Ensure the output directory exists; if not, create it.
     output_dir = os.path.dirname(index_filename)
