@@ -87,7 +87,7 @@ class IVFBase {
             Tensor<float, 2, true>& vecs,
             Tensor<idx_t, 1, true>& indices);
 
-    /// Find the approximate k nearest neighbors for `queries` against
+    /// Find the approximate k nearest neigbors for `queries` against
     /// our database
     virtual void search(
             Index* coarseQuantizer,
@@ -125,6 +125,16 @@ class IVFBase {
             idx_t listId,
             // resident on the host
             const void* codes,
+            // resident on the host
+            const idx_t* indices,
+            idx_t numVecs);
+
+    /// Adds a set of already-translated GPU codes and indices to a list
+    virtual void addEncodedGpuVectorsToList_(
+            idx_t listId,
+            // resident on the host, in GPU layout
+            const uint8_t* gpuCodes,
+            size_t gpuListSizeInBytes,
             // resident on the host
             const idx_t* indices,
             idx_t numVecs);

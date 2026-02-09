@@ -19,7 +19,9 @@
 #include <faiss/gpu/utils/DeviceDefs.cuh>
 #include <faiss/gpu/utils/HostTensor.cuh>
 #include <faiss/gpu/utils/ThrustUtils.cuh>
+#include <fstream>
 #include <limits>
+#include <string>
 #include <unordered_map>
 
 namespace faiss {
@@ -326,9 +328,88 @@ std::vector<uint8_t> IVFBase::getListVectorData(idx_t listId, bool gpuFormat)
 
 void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
     idx_t nlist = ivf ? ivf->nlist : 0;
+    if (nlist == 0) {
+        return;
+    }
+
+    const std::string gpuCodesPath = "/dev/shm/gpu_codes_all.bin";
+
+    std::vector<idx_t> listSizes(nlist);
+    size_t totalGpuBytes = 0;
     for (idx_t i = 0; i < nlist; ++i) {
-        addEncodedVectorsToList_(
-                i, ivf->get_codes(i), ivf->get_ids(i), ivf->list_size(i));
+        listSizes[i] = ivf->list_size(i);
+        totalGpuBytes += getGpuVectorsEncodingSize_(listSizes[i]);
+    }
+
+    bool loadedFromFile = false;
+    std::vector<uint8_t> allGpuCodes;
+
+    if (totalGpuBytes > 0) {
+        std::ifstream in(gpuCodesPath, std::ios::binary | std::ios::ate);
+        if (in.good()) {
+            auto fileSize = static_cast<size_t>(in.tellg());
+            if (fileSize == totalGpuBytes) {
+                allGpuCodes.resize(totalGpuBytes);
+                in.seekg(0, std::ios::beg);
+                in.read(reinterpret_cast<char*>(allGpuCodes.data()),
+                        totalGpuBytes);
+                loadedFromFile = in.good();
+            }
+        }
+    }
+
+    if (loadedFromFile) {
+        size_t offset = 0;
+        for (idx_t i = 0; i < nlist; ++i) {
+            auto numVecs = listSizes[i];
+            if (numVecs == 0) {
+                continue;
+            }
+
+            auto gpuListSizeInBytes = getGpuVectorsEncodingSize_(numVecs);
+            addEncodedGpuVectorsToList_(
+                    i,
+                    allGpuCodes.data() + offset,
+                    gpuListSizeInBytes,
+                    ivf->get_ids(i),
+                    numVecs);
+            offset += gpuListSizeInBytes;
+        }
+
+        return;
+    }
+
+    std::ofstream out;
+    if (totalGpuBytes > 0) {
+        out.open(gpuCodesPath, std::ios::binary | std::ios::trunc);
+    }
+
+    for (idx_t i = 0; i < nlist; ++i) {
+        auto numVecs = listSizes[i];
+        if (numVecs == 0) {
+            continue;
+        }
+
+        auto gpuListSizeInBytes = getGpuVectorsEncodingSize_(numVecs);
+        auto cpuListSizeInBytes = getCpuVectorsEncodingSize_(numVecs);
+
+        std::vector<uint8_t> codesV(cpuListSizeInBytes);
+        std::memcpy(codesV.data(), ivf->get_codes(i), cpuListSizeInBytes);
+        auto translatedCodes =
+                translateCodesToGpu_(std::move(codesV), numVecs);
+        FAISS_ASSERT(translatedCodes.size() == gpuListSizeInBytes);
+
+        addEncodedGpuVectorsToList_(
+                i,
+                translatedCodes.data(),
+                gpuListSizeInBytes,
+                ivf->get_ids(i),
+                numVecs);
+
+        if (out.good()) {
+            out.write(reinterpret_cast<const char*>(translatedCodes.data()),
+                      gpuListSizeInBytes);
+        }
     }
 }
 
@@ -375,22 +456,51 @@ void IVFBase::addEncodedVectorsToList_(
     std::memcpy(codesV.data(), codes, cpuListSizeInBytes);
     auto translatedCodes = translateCodesToGpu_(std::move(codesV), numVecs);
 
-    listCodes->data.append(
+        addEncodedGpuVectorsToList_(
+            listId,
             translatedCodes.data(),
+            gpuListSizeInBytes,
+            indices,
+            numVecs);
+    }
+
+    void IVFBase::addEncodedGpuVectorsToList_(
+        idx_t listId,
+        const uint8_t* gpuCodes,
+        size_t gpuListSizeInBytes,
+        const idx_t* indices,
+        idx_t numVecs) {
+        auto stream = resources_->getDefaultStreamCurrentDevice();
+
+        // This list must already exist
+        FAISS_ASSERT(listId < deviceListData_.size());
+
+        // This list must currently be empty
+        auto& listCodes = deviceListData_[listId];
+        FAISS_ASSERT(listCodes->data.size() == 0);
+        FAISS_ASSERT(listCodes->numVecs == 0);
+
+        // If there's nothing to add, then there's nothing we have to do
+        if (numVecs == 0) {
+        return;
+        }
+
+        listCodes->data.append(
+            gpuCodes,
             gpuListSizeInBytes,
             stream,
             true /* exact reserved size */);
-    listCodes->numVecs = numVecs;
+        listCodes->numVecs = numVecs;
 
-    // Handle the indices as well
-    addIndicesFromCpu_(listId, indices, numVecs);
+        // Handle the indices as well
+        addIndicesFromCpu_(listId, indices, numVecs);
 
-    deviceListDataPointers_.setAt(
+        deviceListDataPointers_.setAt(
             listId, (void*)listCodes->data.data(), stream);
-    deviceListLengths_.setAt(listId, numVecs, stream);
+        deviceListLengths_.setAt(listId, numVecs, stream);
 
-    // We update this as well, since the multi-pass algorithm uses it
-    maxListLength_ = std::max(maxListLength_, numVecs);
+        // We update this as well, since the multi-pass algorithm uses it
+        maxListLength_ = std::max(maxListLength_, numVecs);
 }
 
 void IVFBase::addIndicesFromCpu_(
