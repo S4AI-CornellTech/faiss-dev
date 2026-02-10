@@ -11,37 +11,61 @@ from tqdm import tqdm
 # ==============================================================
 # Config
 # ==============================================================
-INDEX_PATH = "/home/nvidia/Desktop/ivf_100m_pq64.faiss"
+INDEX_PATH = "/home/nvidia/Desktop/ivf_100m_sq8.faiss"
 QUERY_FILE = "/home/nvidia/Desktop/triviaqa_encodings.npy"
-OUTPUT_PATH = "/home/nvidia/Desktop/ENHANCED_[Save_and_load_unified_memory]_INDEX_TRANSFER_TIMES_100M_PQ64.csv"
+OUTPUT_PATH = "/home/nvidia/Desktop/ENHANCED_[tmp]_INDEX_TRANSFER_TIMES_100M_SQ8.csv"
 
 NPROBE = 256
 BATCH_SIZE = 32
 RETRIEVED_DOCS = 5
-MAX_BATCHES = 32
-TRIALS = 100
+MAX_BATCHES = 100
+TRIALS = 2
 
-# ==============================================================
-# Performance toggles
-# ==============================================================
-USE_UNIFIED_MEMORY = True  # Set True only if you need UM capacity
-PINNED_MEM_BYTES = 4 * 1024 * 1024 * 1024  # 4 GiB pinned staging
+USE_UNIFIED_MEMORY = False  # Set True only if you need UM capacity
+PINNED_MEM_BYTES = 16 * 1024 * 1024 * 1024  # 4 GiB pinned staging
 TRANSFER_ONLY = True  # Skip query timing when True
 
-# ==============================================================
-# GPU setup (GH200-safe)
-# ==============================================================
 def get_gpu_resources():
     res = faiss.StandardGpuResources()
+    
+    # Increase temp memory even more for large indices
+    res.setTempMemory(24 * 1024 * 1024 * 1024)  # 24 GB
+    
+    # Larger pinned memory pool
+    res.setPinnedMemory(PINNED_MEM_BYTES)  # 8 GiB
 
-    # GH200 needs LARGE temp memory
-    res.setTempMemory(16 * 1024 * 1024 * 1024)  # 16 GB
-
-    # Use a pinned pool for faster H2D transfers
-    res.setPinnedMemory(PINNED_MEM_BYTES)
-
+    print(f"GPU Resources configured:")
+    print(f"  Temp memory: 24 GB")
+    print(f"  Pinned memory: {PINNED_MEM_BYTES / (1024**3):.1f} GB")
+    
     return res
 
+def load_faiss_gpu_index(cpu_index, nprobe, res):
+    co = faiss.GpuClonerOptions()
+    co.useUnifiedMemory = False
+    co.useFloat16 = False
+    co.usePrecomputed = False
+    co.indicesOptions = faiss.INDICES_64_BIT
+    
+    print(f"\nStarting GPU transfer...")
+    print(f"  Index type: {type(cpu_index).__name__}")
+    print(f"  Total vectors: {cpu_index.ntotal:,}")
+    if hasattr(cpu_index, 'nlist'):
+        print(f"  IVF lists: {cpu_index.nlist:,}")
+    
+    t2 = time.perf_counter()
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index, co)
+    t_transfer = time.perf_counter()
+    print(f"  Transfer completed: {t_transfer - t2:.3f}s")
+    
+    cuda_sync(res)
+    t3 = time.perf_counter()
+    print(f"  After sync: {t3 - t2:.3f}s")
+    
+    gpu_load_time = t3 - t2
+    gpu_index.nprobe = nprobe
+    
+    return gpu_index, 0.0, gpu_load_time, gpu_load_time
 
 def cuda_sync(res):
     """
@@ -49,33 +73,6 @@ def cuda_sync(res):
     """
     res.syncDefaultStreamCurrentDevice()
 
-
-# ==============================================================
-# Index loading
-# ==============================================================
-def load_faiss_gpu_index(cpu_index, nprobe, res):
-    cpu_load_time = 0.0
-
-    # GPU clone options (GH200-safe)
-    co = faiss.GpuClonerOptions()
-    co.useUnifiedMemory = USE_UNIFIED_MEMORY
-    co.useFloat16 = True
-
-    # GPU transfer
-    t2 = time.perf_counter()
-    gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index, co)
-    cuda_sync(res)
-    t3 = time.perf_counter()
-    gpu_load_time = t3 - t2
-
-    gpu_index.nprobe = nprobe
-
-    return gpu_index, cpu_load_time, gpu_load_time, cpu_load_time + gpu_load_time
-
-
-# ==============================================================
-# Query benchmark
-# ==============================================================
 def perform_queries(index, k, embeddings, batch_size, res):
     query_times = []
 
@@ -96,10 +93,6 @@ def perform_queries(index, k, embeddings, batch_size, res):
 
     return sum(query_times) / len(query_times)
 
-
-# ==============================================================
-# Main
-# ==============================================================
 def main():
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
 
@@ -166,7 +159,6 @@ def main():
         print("Average Query Latency:   0.000000 s (transfer only)\n")
     else:
         print(f"Average Query Latency:   {sum_query / TRIALS:.6f} s\n")
-
 
 if __name__ == "__main__":
     os.environ["FAISS_VERBOSE"] = "1"
