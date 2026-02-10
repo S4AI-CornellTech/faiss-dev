@@ -562,9 +562,28 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
 
     const char* packedEnv = std::getenv("FAISS_GPU_PACKED_LISTS");
     const char* packedDebugEnv = std::getenv("FAISS_GPU_PACKED_LISTS_DEBUG");
+    const char* packedProfileEnv =
+            std::getenv("FAISS_GPU_PACKED_LISTS_PROFILE");
     const char* packedMmapEnv = std::getenv("FAISS_GPU_PACKED_LISTS_MMAP");
     bool usePacked = packedEnv && std::string(packedEnv) == "1";
     bool useMmap = packedMmapEnv && std::string(packedMmapEnv) == "1";
+    bool profile = packedProfileEnv && std::string(packedProfileEnv) == "1";
+
+    auto now = []() { return std::chrono::high_resolution_clock::now(); };
+    auto elapsedSec = [](const auto& start, const auto& end) {
+        return std::chrono::duration<double>(end - start).count();
+    };
+    auto t_all_start = now();
+    double t_meta = 0.0;
+    double t_sizes = 0.0;
+    double t_codes_cache = 0.0;
+    double t_codes_upload = 0.0;
+    double t_indices_cache = 0.0;
+    double t_indices_upload = 0.0;
+    double t_alloc_codes = 0.0;
+    double t_alloc_indices = 0.0;
+    double t_pointer_update = 0.0;
+    double t_stream_sync = 0.0;
 
     // Packed lists require GPU-resident indices
     if (indicesOptions_ == INDICES_CPU) {
@@ -580,6 +599,7 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
 
     bool metaLoaded = false;
     if (usePacked) {
+        auto t0 = now();
         metaLoaded = readPackedMeta(
                 metaPath,
                 nlist,
@@ -589,6 +609,7 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                 listIndexOffsets,
                 totalGpuBytes,
                 totalIndexBytes);
+        t_meta = elapsedSec(t0, now());
     }
     if (packedDebugEnv) {
         std::cerr << "[faiss] packed_lists usePacked=" << usePacked
@@ -597,6 +618,7 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                   << " nlist=" << nlist << "\n";
     }
 
+    auto t_sizes_start = now();
     if (!metaLoaded) {
         size_t running = 0;
         size_t indexRunning = 0;
@@ -624,7 +646,9 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
             listGpuBytes[i] = getGpuVectorsEncodingSize_(listSizes[i]);
         }
     }
+    t_sizes = elapsedSec(t_sizes_start, now());
 
+    auto t_codes_cache_start = now();
     bool codesCacheOk = false;
     std::ifstream codesIn(codesPath, std::ios::binary | std::ios::ate);
     if (codesIn.good()) {
@@ -634,6 +658,7 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
             codesIn.seekg(0, std::ios::beg);
         }
     }
+    t_codes_cache = elapsedSec(t_codes_cache_start, now());
 
     if (packedDebugEnv) {
         std::cerr << "[faiss] packed_lists codesCacheOk=" << codesCacheOk
@@ -647,7 +672,9 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
         auto copyStream = resources_->getAsyncCopyStreamCurrentDevice();
         auto defaultStream = resources_->getDefaultStreamCurrentDevice();
 
-        packedListData_.resize(totalGpuBytes, copyStream);
+        auto t_alloc_codes_start = now();
+        packedListData_.resizeNoInitExact(totalGpuBytes, copyStream);
+        t_alloc_codes = elapsedSec(t_alloc_codes_start, now());
 
         auto copyFileToDevice = [&](
                 std::ifstream& in,
@@ -760,6 +787,7 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
             }
         };
 
+        auto t_codes_upload_start = now();
         if (useMmap) {
             auto mapped = mapFileReadOnly(codesPath);
             if (mapped.data && mapped.size == totalGpuBytes) {
@@ -800,7 +828,9 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                     codesReadSec,
                     codesCopySec);
         }
+            t_codes_upload = elapsedSec(t_codes_upload_start, now());
 
+        auto t_indices_cache_start = now();
         bool indicesCacheOk = false;
         std::ifstream indicesIn;
         std::ofstream indicesOut;
@@ -816,14 +846,18 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                 }
             }
         }
+        t_indices_cache = elapsedSec(t_indices_cache_start, now());
 
         if (packedDebugEnv) {
             std::cerr << "[faiss] packed_lists indicesCacheOk=" << indicesCacheOk
                       << " totalIndexBytes=" << totalIndexBytes << "\n";
         }
 
+        auto t_indices_upload_start = now();
         if (indicesCacheOk) {
-                packedListIndices_.resize(totalIndexBytes, copyStream);
+            auto t_alloc_indices_start = now();
+            packedListIndices_.resizeNoInitExact(totalIndexBytes, copyStream);
+            t_alloc_indices += elapsedSec(t_alloc_indices_start, now());
             if (useMmap) {
                 auto mapped = mapFileReadOnly(indicesPath);
                 if (mapped.data && mapped.size == totalIndexBytes) {
@@ -871,7 +905,9 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                 indicesOut.open(
                         indicesPath, std::ios::binary | std::ios::trunc);
             }
-            packedListIndices_.resize(totalIndexBytes, copyStream);
+            auto t_alloc_indices_start = now();
+            packedListIndices_.resizeNoInitExact(totalIndexBytes, copyStream);
+            t_alloc_indices += elapsedSec(t_alloc_indices_start, now());
 
             for (idx_t i = 0; i < nlist; ++i) {
                 if (listSizes[i] == 0) {
@@ -919,7 +955,9 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                 }
             }
         }
+        t_indices_upload = elapsedSec(t_indices_upload_start, now());
 
+        auto t_pointer_start = now();
         for (idx_t i = 0; i < nlist; ++i) {
             if (listSizes[i] == 0) {
                 continue;
@@ -944,6 +982,7 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                 deviceListIndices_[i]->numVecs = listSizes[i];
             }
         }
+        t_pointer_update = elapsedSec(t_pointer_start, now());
 
         packedLists_ = true;
         packedListCodeOffsets_ = listOffsets;
@@ -975,7 +1014,24 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
             }
             std::cerr << "[faiss] packed_lists enabled; bulk upload complete\n";
         }
+        auto t_sync_start = now();
         streamWait({defaultStream}, {copyStream});
+        t_stream_sync = elapsedSec(t_sync_start, now());
+
+        if (profile) {
+            auto totalSec = elapsedSec(t_all_start, now());
+            std::cerr << "[faiss] packed_lists profile meta=" << t_meta
+                      << "s sizes=" << t_sizes
+                      << "s alloc_codes=" << t_alloc_codes
+                      << "s alloc_indices=" << t_alloc_indices
+                      << "s codes_cache=" << t_codes_cache
+                      << "s codes_upload=" << t_codes_upload
+                      << "s indices_cache=" << t_indices_cache
+                      << "s indices_upload=" << t_indices_upload
+                      << "s pointer_update=" << t_pointer_update
+                      << "s stream_sync=" << t_stream_sync
+                      << "s total=" << totalSec << "s\n";
+        }
         return;
     }
 

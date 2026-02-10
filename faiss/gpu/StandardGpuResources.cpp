@@ -31,6 +31,7 @@
 
 #include <faiss/gpu/StandardGpuResources.h>
 #include <faiss/gpu/utils/DeviceUtils.h>
+#include <faiss/gpu/utils/DeviceVector.cuh>
 #include <faiss/gpu/utils/StaticUtils.h>
 #include <faiss/impl/FaissAssert.h>
 #include <iostream>
@@ -110,6 +111,9 @@ StandardGpuResourcesImpl::~StandardGpuResourcesImpl() {
     // The temporary memory allocator has allocated memory through us, so clean
     // that up before we finish fully de-initializing ourselves
     tempMemory_.clear();
+
+    // Release any cached DeviceVector allocations tied to this resource.
+    faiss::gpu::DeviceVector<uint8_t>::clearCacheForResource(this);
 
     // Make sure all allocations have been freed
     bool allocError = false;
@@ -700,7 +704,7 @@ StandardGpuResourcesImpl::getMemoryInfo() const {
 //
 
 StandardGpuResources::StandardGpuResources()
-        : res_(std::make_shared<StandardGpuResourcesImpl>()) {}
+        : res_(new StandardGpuResourcesImpl) {}
 
 StandardGpuResources::~StandardGpuResources() = default;
 

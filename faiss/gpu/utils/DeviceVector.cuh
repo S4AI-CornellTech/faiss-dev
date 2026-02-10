@@ -15,6 +15,10 @@
 #include <thrust/execution_policy.h>
 #include <thrust/fill.h>
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace faiss {
@@ -51,7 +55,7 @@ class DeviceVector {
 
     // Clear all allocated memory; reset to zero size
     void clear() {
-        alloc_.release();
+        cacheOrRelease_();
         num_ = 0;
         capacity_ = 0;
     }
@@ -143,6 +147,19 @@ class DeviceVector {
         return mem;
     }
 
+    // Returns true if we actually reallocated memory; skips zero-fill
+    bool resizeNoInitExact(size_t newSize, cudaStream_t stream) {
+        bool mem = false;
+
+        if (newSize > capacity_) {
+            realloc_(newSize, stream, false);
+            mem = true;
+        }
+
+        num_ = newSize;
+        return mem;
+    }
+
     // Set all entries in the vector to `value`
     void setAll(const T& value, cudaStream_t stream) {
         if (num_ > 0) {
@@ -181,7 +198,7 @@ class DeviceVector {
         size_t free = capacity_ - num_;
 
         if (exact) {
-            realloc_(num_, stream);
+            realloc_(num_, stream, true);
             return free * sizeof(T);
         }
 
@@ -196,7 +213,7 @@ class DeviceVector {
             size_t oldCapacity = capacity_;
             FAISS_ASSERT(newCapacity < oldCapacity);
 
-            realloc_(newCapacity, stream);
+            realloc_(newCapacity, stream, true);
 
             return (oldCapacity - newCapacity) * sizeof(T);
         }
@@ -211,12 +228,12 @@ class DeviceVector {
         }
 
         // Otherwise, we need new space.
-        realloc_(newCapacity, stream);
+        realloc_(newCapacity, stream, true);
         return true;
     }
 
    private:
-    void realloc_(size_t newCapacity, cudaStream_t stream) {
+    void realloc_(size_t newCapacity, cudaStream_t stream, bool zeroFillNewSpace) {
         FAISS_ASSERT(num_ <= newCapacity);
 
         size_t newSizeInBytes = newCapacity * sizeof(T);
@@ -225,26 +242,168 @@ class DeviceVector {
         // The new allocation will occur on this stream
         allocInfo_.stream = stream;
 
-        auto newAlloc = res_->allocMemoryHandle(
-                AllocRequest(allocInfo_, newSizeInBytes));
+        GpuMemoryReservation newAlloc;
+        size_t allocBytes = 0;
+        if (tryGetCachedAlloc_(newSizeInBytes, newAlloc, allocBytes)) {
+            newSizeInBytes = allocBytes;
+            newCapacity = newSizeInBytes / sizeof(T);
+        } else {
+            newAlloc = res_->allocMemoryHandle(
+                    AllocRequest(allocInfo_, newSizeInBytes));
+            allocBytes = newSizeInBytes;
+        }
 
         // Copy over any old data
-        CUDA_VERIFY(cudaMemcpyAsync(
+        if (oldSizeInBytes > 0) {
+            CUDA_VERIFY(cudaMemcpyAsync(
                 newAlloc.data,
                 data(),
                 oldSizeInBytes,
                 cudaMemcpyDeviceToDevice,
                 stream));
+        }
 
         // Zero out the new space past the data we just copied
-        CUDA_VERIFY(cudaMemsetAsync(
+        if (zeroFillNewSpace && newSizeInBytes > oldSizeInBytes) {
+            CUDA_VERIFY(cudaMemsetAsync(
                 (uint8_t*)newAlloc.data + oldSizeInBytes,
                 0,
                 newSizeInBytes - oldSizeInBytes,
                 stream));
+        }
 
+        auto oldAlloc = std::move(alloc_);
         alloc_ = std::move(newAlloc);
         capacity_ = newCapacity;
+
+        if (oldAlloc.res) {
+            cacheAlloc_(std::move(oldAlloc));
+        }
+    }
+
+    void cacheOrRelease_() {
+        if (!alloc_.res) {
+            return;
+        }
+
+        if (!cacheAlloc_(std::move(alloc_))) {
+            alloc_.release();
+        }
+    }
+
+    bool cacheAlloc_(GpuMemoryReservation&& alloc) {
+        if (!alloc.res) {
+            return false;
+        }
+
+        if (!cacheEnabled_() || alloc.size < cacheMinBytes_()) {
+            return false;
+        }
+
+        auto key = cacheKey_();
+        auto& map = cacheMap_();
+        std::lock_guard<std::mutex> lock(cacheMutex_());
+        auto& entry = map[key];
+        if (entry.alloc.res && entry.size >= alloc.size) {
+            return false;
+        }
+
+        entry.alloc = std::move(alloc);
+        entry.size = entry.alloc.size;
+        return true;
+    }
+
+    bool tryGetCachedAlloc_(
+            size_t sizeBytes,
+            GpuMemoryReservation& out,
+            size_t& outBytes) {
+        if (!cacheEnabled_() || sizeBytes < cacheMinBytes_()) {
+            return false;
+        }
+
+        auto key = cacheKey_();
+        auto& map = cacheMap_();
+        std::lock_guard<std::mutex> lock(cacheMutex_());
+        auto it = map.find(key);
+        if (it == map.end()) {
+            return false;
+        }
+
+        if (!it->second.alloc.res || it->second.size < sizeBytes) {
+            return false;
+        }
+
+        out = std::move(it->second.alloc);
+        outBytes = it->second.size;
+        map.erase(it);
+        return true;
+    }
+
+    struct CacheEntry {
+        GpuMemoryReservation alloc;
+        size_t size = 0;
+    };
+
+    uint64_t cacheKey_() const {
+        return (static_cast<uint64_t>(allocInfo_.device) & 0xffff) |
+                (static_cast<uint64_t>(allocInfo_.space) << 16) |
+                (static_cast<uint64_t>(allocInfo_.type) << 24);
+    }
+
+    static std::unordered_map<uint64_t, CacheEntry>& cacheMap_() {
+        static std::unordered_map<uint64_t, CacheEntry> map;
+        return map;
+    }
+
+    static void clearCacheForResource_(GpuResources* res) {
+        if (!res) {
+            return;
+        }
+        auto& map = cacheMap_();
+        std::lock_guard<std::mutex> lock(cacheMutex_());
+        for (auto it = map.begin(); it != map.end();) {
+            if (it->second.alloc.res == res) {
+                it->second.alloc.release();
+                it = map.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    static std::mutex& cacheMutex_() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static bool cacheEnabled_() {
+        static int enabled = -1;
+        if (enabled < 0) {
+            const char* env = std::getenv("FAISS_GPU_DEVICEVECTOR_CACHE");
+            enabled = (env && std::strcmp(env, "1") == 0) ? 1 : 0;
+        }
+        return enabled == 1;
+    }
+
+    static size_t cacheMinBytes_() {
+        static size_t minBytes = 0;
+        if (minBytes == 0) {
+            const char* env =
+                    std::getenv("FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES");
+            if (env && *env) {
+                minBytes = std::strtoull(env, nullptr, 10);
+            }
+            if (minBytes == 0) {
+                minBytes = 1024ULL * 1024ULL * 1024ULL;
+            }
+        }
+        return minBytes;
+    }
+
+   public:
+    // Clear cached allocations associated with the given resources instance.
+    static void clearCacheForResource(GpuResources* res) {
+        clearCacheForResource_(res);
     }
 
     size_t getNewCapacity_(size_t preferredSize) {
