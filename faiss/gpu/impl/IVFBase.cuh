@@ -130,12 +130,10 @@ class IVFBase {
             idx_t numVecs);
 
     /// Adds a set of already-translated GPU codes and indices to a list
-    virtual void addEncodedGpuVectorsToList_(
+    void addEncodedGpuVectorsToList_(
             idx_t listId,
-            // resident on the host, in GPU layout
             const uint8_t* gpuCodes,
             size_t gpuListSizeInBytes,
-            // resident on the host
             const idx_t* indices,
             idx_t numVecs);
 
@@ -279,6 +277,13 @@ class IVFBase {
     /// resizing (and potential re-allocation) of deviceList*_
     std::vector<std::unique_ptr<DeviceIVFList>> deviceListData_;
     std::vector<std::unique_ptr<DeviceIVFList>> deviceListIndices_;
+
+        /// Packed list storage for fast bulk transfers
+        bool packedLists_;
+        DeviceVector<uint8_t> packedListData_;
+        DeviceVector<uint8_t> packedListIndices_;
+        std::vector<size_t> packedListCodeOffsets_;
+        std::vector<size_t> packedListIndexOffsets_;
 
     /// If we are storing indices on the CPU (indicesOptions_ is
     /// INDICES_CPU), then this maintains a CPU-side map of what

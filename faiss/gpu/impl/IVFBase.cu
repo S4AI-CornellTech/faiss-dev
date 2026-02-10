@@ -19,13 +19,175 @@
 #include <faiss/gpu/utils/DeviceDefs.cuh>
 #include <faiss/gpu/utils/HostTensor.cuh>
 #include <faiss/gpu/utils/ThrustUtils.cuh>
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <chrono>
+#include <fcntl.h>
 #include <fstream>
+#include <iostream>
 #include <limits>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <string>
 #include <unordered_map>
+#include <unistd.h>
 
 namespace faiss {
 namespace gpu {
+
+namespace {
+
+constexpr uint64_t kPackedCacheMagic = 0x4653504b5f4d4554ULL; // "FSPK_MET"
+constexpr uint64_t kPackedCacheVersion = 1;
+
+struct PackedCacheHeader {
+    uint64_t magic;
+    uint64_t version;
+    uint64_t nlist;
+    uint64_t indicesOptions;
+    uint64_t totalGpuBytes;
+    uint64_t totalIndexBytes;
+};
+
+struct MMapFile {
+    void* data = nullptr;
+    size_t size = 0;
+    int fd = -1;
+};
+
+MMapFile mapFileReadOnly(const std::string& path) {
+    MMapFile mapped;
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return mapped;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        return mapped;
+    }
+
+    void* data = mmap(nullptr, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED) {
+        close(fd);
+        return mapped;
+    }
+
+    mapped.data = data;
+    mapped.size = static_cast<size_t>(st.st_size);
+    mapped.fd = fd;
+    return mapped;
+}
+
+void unmapFile(MMapFile& mapped) {
+    if (mapped.data && mapped.data != MAP_FAILED) {
+        munmap(mapped.data, mapped.size);
+    }
+    if (mapped.fd >= 0) {
+        close(mapped.fd);
+    }
+    mapped.data = nullptr;
+    mapped.size = 0;
+    mapped.fd = -1;
+}
+
+bool readPackedMeta(
+        const std::string& path,
+        idx_t expectedNlist,
+        IndicesOptions indicesOptions,
+        std::vector<idx_t>& listSizes,
+        std::vector<size_t>& codeOffsets,
+        std::vector<size_t>& indexOffsets,
+        size_t& totalGpuBytes,
+        size_t& totalIndexBytes) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.good()) {
+        return false;
+    }
+
+    PackedCacheHeader header{};
+    in.read(reinterpret_cast<char*>(&header), sizeof(header));
+    if (!in.good()) {
+        return false;
+    }
+
+    if (header.magic != kPackedCacheMagic ||
+        header.version != kPackedCacheVersion ||
+        header.nlist != static_cast<uint64_t>(expectedNlist) ||
+        header.indicesOptions != static_cast<uint64_t>(indicesOptions)) {
+        return false;
+    }
+
+    listSizes.resize(header.nlist);
+    codeOffsets.resize(header.nlist);
+    indexOffsets.resize(header.nlist);
+
+    for (uint64_t i = 0; i < header.nlist; ++i) {
+        uint64_t value = 0;
+        in.read(reinterpret_cast<char*>(&value), sizeof(value));
+        listSizes[i] = static_cast<idx_t>(value);
+    }
+    for (uint64_t i = 0; i < header.nlist; ++i) {
+        uint64_t value = 0;
+        in.read(reinterpret_cast<char*>(&value), sizeof(value));
+        codeOffsets[i] = static_cast<size_t>(value);
+    }
+    for (uint64_t i = 0; i < header.nlist; ++i) {
+        uint64_t value = 0;
+        in.read(reinterpret_cast<char*>(&value), sizeof(value));
+        indexOffsets[i] = static_cast<size_t>(value);
+    }
+
+    if (!in.good()) {
+        return false;
+    }
+
+    totalGpuBytes = static_cast<size_t>(header.totalGpuBytes);
+    totalIndexBytes = static_cast<size_t>(header.totalIndexBytes);
+    return true;
+}
+
+void writePackedMeta(
+        const std::string& path,
+        idx_t nlist,
+        IndicesOptions indicesOptions,
+        const std::vector<idx_t>& listSizes,
+        const std::vector<size_t>& codeOffsets,
+        const std::vector<size_t>& indexOffsets,
+        size_t totalGpuBytes,
+        size_t totalIndexBytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.good()) {
+        return;
+    }
+
+    PackedCacheHeader header{};
+    header.magic = kPackedCacheMagic;
+    header.version = kPackedCacheVersion;
+    header.nlist = static_cast<uint64_t>(nlist);
+    header.indicesOptions = static_cast<uint64_t>(indicesOptions);
+    header.totalGpuBytes = static_cast<uint64_t>(totalGpuBytes);
+    header.totalIndexBytes = static_cast<uint64_t>(totalIndexBytes);
+
+    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+    for (idx_t i = 0; i < nlist; ++i) {
+        uint64_t value = static_cast<uint64_t>(listSizes[i]);
+        out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    }
+    for (idx_t i = 0; i < nlist; ++i) {
+        uint64_t value = static_cast<uint64_t>(codeOffsets[i]);
+        out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    }
+    for (idx_t i = 0; i < nlist; ++i) {
+        uint64_t value = static_cast<uint64_t>(indexOffsets[i]);
+        out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+    }
+}
+
+} // namespace
 
 IVFBase::DeviceIVFList::DeviceIVFList(GpuResources* res, const AllocInfo& info)
         : data(res, info), numVecs(0) {}
@@ -70,7 +232,22 @@ IVFBase::IVFBase(
                           getCurrentDevice(),
                           space,
                           resources->getDefaultStreamCurrentDevice())),
-          maxListLength_(0) {
+          maxListLength_(0),
+          packedLists_(false),
+          packedListData_(
+              resources,
+              AllocInfo(
+                  AllocType::IVFLists,
+                  getCurrentDevice(),
+                  space,
+                  resources->getDefaultStreamCurrentDevice())),
+          packedListIndices_(
+              resources,
+              AllocInfo(
+                  AllocType::IVFLists,
+                  getCurrentDevice(),
+                  space,
+                  resources->getDefaultStreamCurrentDevice())) {
     reset();
 }
 
@@ -116,6 +293,11 @@ void IVFBase::reset() {
     deviceListIndexPointers_.clear();
     deviceListLengths_.clear();
     listOffsetToUserIndex_.clear();
+    packedLists_ = false;
+    packedListData_.clear();
+    packedListIndices_.clear();
+    packedListCodeOffsets_.clear();
+    packedListIndexOffsets_.clear();
 
     auto info =
             AllocInfo(AllocType::IVFLists, getCurrentDevice(), space_, stream);
@@ -266,6 +448,35 @@ std::vector<idx_t> IVFBase::getListIndices(idx_t listId) const {
 
     auto stream = resources_->getDefaultStreamCurrentDevice();
 
+    if (packedLists_ &&
+        (indicesOptions_ == INDICES_32_BIT ||
+         indicesOptions_ == INDICES_64_BIT)) {
+        size_t bytes = (indicesOptions_ == INDICES_32_BIT)
+                ? deviceListData_[listId]->numVecs * sizeof(int)
+                : deviceListData_[listId]->numVecs * sizeof(idx_t);
+
+        std::vector<uint8_t> host(bytes);
+        CUDA_VERIFY(cudaMemcpyAsync(
+                host.data(),
+                packedListIndices_.data() + packedListIndexOffsets_[listId],
+                bytes,
+                cudaMemcpyDeviceToHost,
+                stream));
+
+        if (indicesOptions_ == INDICES_32_BIT) {
+            auto intInd = reinterpret_cast<const int*>(host.data());
+            std::vector<idx_t> out(deviceListData_[listId]->numVecs);
+            for (size_t i = 0; i < out.size(); ++i) {
+                out[i] = (idx_t)intInd[i];
+            }
+            return out;
+        }
+
+        auto idxInd = reinterpret_cast<const idx_t*>(host.data());
+        return std::vector<idx_t>(
+                idxInd, idxInd + deviceListData_[listId]->numVecs);
+    }
+
     if (indicesOptions_ == INDICES_32_BIT) {
         // The data is stored as int32 on the GPU
         FAISS_ASSERT(listId < deviceListIndices_.size());
@@ -315,7 +526,20 @@ std::vector<uint8_t> IVFBase::getListVectorData(idx_t listId, bool gpuFormat)
     auto stream = resources_->getDefaultStreamCurrentDevice();
 
     auto& list = deviceListData_[listId];
-    auto gpuCodes = list->data.copyToHost<uint8_t>(stream);
+    std::vector<uint8_t> gpuCodes;
+
+    if (packedLists_) {
+        size_t bytes = getGpuVectorsEncodingSize_(list->numVecs);
+        gpuCodes.resize(bytes);
+        CUDA_VERIFY(cudaMemcpyAsync(
+                gpuCodes.data(),
+                packedListData_.data() + packedListCodeOffsets_[listId],
+                bytes,
+                cudaMemcpyDeviceToHost,
+                stream));
+    } else {
+        gpuCodes = list->data.copyToHost<uint8_t>(stream);
+    }
 
     if (gpuFormat) {
         return gpuCodes;
@@ -332,56 +556,451 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
         return;
     }
 
-    const std::string gpuCodesPath = "/dev/shm/gpu_codes_all.bin";
+    const std::string codesPath = "/dev/shm/gpu_codes_all.bin";
+    const std::string indicesPath = "/dev/shm/gpu_indices_all.bin";
+    const std::string metaPath = "/dev/shm/gpu_codes_all.meta";
 
-    std::vector<idx_t> listSizes(nlist);
-    size_t totalGpuBytes = 0;
-    for (idx_t i = 0; i < nlist; ++i) {
-        listSizes[i] = ivf->list_size(i);
-        totalGpuBytes += getGpuVectorsEncodingSize_(listSizes[i]);
+    const char* packedEnv = std::getenv("FAISS_GPU_PACKED_LISTS");
+    const char* packedDebugEnv = std::getenv("FAISS_GPU_PACKED_LISTS_DEBUG");
+    const char* packedMmapEnv = std::getenv("FAISS_GPU_PACKED_LISTS_MMAP");
+    bool usePacked = packedEnv && std::string(packedEnv) == "1";
+    bool useMmap = packedMmapEnv && std::string(packedMmapEnv) == "1";
+
+    // Packed lists require GPU-resident indices
+    if (indicesOptions_ == INDICES_CPU) {
+        usePacked = false;
     }
 
-    bool loadedFromFile = false;
-    std::vector<uint8_t> allGpuCodes;
+    std::vector<idx_t> listSizes(nlist);
+    std::vector<size_t> listOffsets(nlist);
+    std::vector<size_t> listGpuBytes(nlist);
+    std::vector<size_t> listIndexOffsets(nlist, 0);
+    size_t totalGpuBytes = 0;
+    size_t totalIndexBytes = 0;
 
-    if (totalGpuBytes > 0) {
-        std::ifstream in(gpuCodesPath, std::ios::binary | std::ios::ate);
-        if (in.good()) {
-            auto fileSize = static_cast<size_t>(in.tellg());
-            if (fileSize == totalGpuBytes) {
-                allGpuCodes.resize(totalGpuBytes);
-                in.seekg(0, std::ios::beg);
-                in.read(reinterpret_cast<char*>(allGpuCodes.data()),
-                        totalGpuBytes);
-                loadedFromFile = in.good();
+    bool metaLoaded = false;
+    if (usePacked) {
+        metaLoaded = readPackedMeta(
+                metaPath,
+                nlist,
+                indicesOptions_,
+                listSizes,
+                listOffsets,
+                listIndexOffsets,
+                totalGpuBytes,
+                totalIndexBytes);
+    }
+    if (packedDebugEnv) {
+        std::cerr << "[faiss] packed_lists usePacked=" << usePacked
+                  << " metaLoaded=" << metaLoaded
+                  << " indicesOptions=" << static_cast<int>(indicesOptions_)
+                  << " nlist=" << nlist << "\n";
+    }
+
+    if (!metaLoaded) {
+        size_t running = 0;
+        size_t indexRunning = 0;
+        size_t indexSize = (indicesOptions_ == INDICES_32_BIT)
+                ? sizeof(int)
+                : sizeof(idx_t);
+
+        for (idx_t i = 0; i < nlist; ++i) {
+            listSizes[i] = ivf->list_size(i);
+            listOffsets[i] = running;
+            listGpuBytes[i] = getGpuVectorsEncodingSize_(listSizes[i]);
+            running += listGpuBytes[i];
+
+            if ((indicesOptions_ == INDICES_32_BIT) ||
+                (indicesOptions_ == INDICES_64_BIT)) {
+                listIndexOffsets[i] = indexRunning;
+                indexRunning += listSizes[i] * indexSize;
             }
+        }
+
+        totalGpuBytes = running;
+        totalIndexBytes = indexRunning;
+    } else {
+        for (idx_t i = 0; i < nlist; ++i) {
+            listGpuBytes[i] = getGpuVectorsEncodingSize_(listSizes[i]);
         }
     }
 
-    if (loadedFromFile) {
-        size_t offset = 0;
+    bool codesCacheOk = false;
+    std::ifstream codesIn(codesPath, std::ios::binary | std::ios::ate);
+    if (codesIn.good()) {
+        auto fileSize = static_cast<size_t>(codesIn.tellg());
+        if (fileSize == totalGpuBytes) {
+            codesCacheOk = true;
+            codesIn.seekg(0, std::ios::beg);
+        }
+    }
+
+    if (packedDebugEnv) {
+        std::cerr << "[faiss] packed_lists codesCacheOk=" << codesCacheOk
+                  << " totalGpuBytes=" << totalGpuBytes << "\n";
+    }
+
+    if (codesCacheOk && usePacked && metaLoaded) {
+        auto pinnedAlloc = resources_->getPinnedMemory();
+        auto* pinnedBuf = static_cast<uint8_t*>(pinnedAlloc.first);
+        size_t pinnedSize = pinnedAlloc.second;
+        auto copyStream = resources_->getAsyncCopyStreamCurrentDevice();
+        auto defaultStream = resources_->getDefaultStreamCurrentDevice();
+
+        packedListData_.resize(totalGpuBytes, copyStream);
+
+        auto copyFileToDevice = [&](
+                std::ifstream& in,
+                uint8_t* dst,
+                size_t totalBytes) {
+            size_t offset = 0;
+            if (pinnedBuf && pinnedSize > 0) {
+                while (offset < totalBytes) {
+                    size_t chunk = std::min(pinnedSize, totalBytes - offset);
+                    in.read(reinterpret_cast<char*>(pinnedBuf), chunk);
+                    FAISS_THROW_IF_NOT_FMT(
+                            in.good(),
+                            "failed reading %zu bytes from cache",
+                            chunk);
+                    CUDA_VERIFY(cudaMemcpyAsync(
+                            dst + offset,
+                            pinnedBuf,
+                            chunk,
+                            cudaMemcpyHostToDevice,
+                            copyStream));
+                    offset += chunk;
+                }
+            } else {
+                std::vector<uint8_t> temp(
+                        std::min<size_t>(256 * 1024 * 1024, totalBytes));
+                while (offset < totalBytes) {
+                    size_t chunk = std::min(temp.size(), totalBytes - offset);
+                    in.read(reinterpret_cast<char*>(temp.data()), chunk);
+                    FAISS_THROW_IF_NOT_FMT(
+                            in.good(),
+                            "failed reading %zu bytes from cache",
+                            chunk);
+                    CUDA_VERIFY(cudaMemcpyAsync(
+                            dst + offset,
+                            temp.data(),
+                            chunk,
+                            cudaMemcpyHostToDevice,
+                            copyStream));
+                    offset += chunk;
+                }
+            }
+        };
+
+        double codesReadSec = 0.0;
+        double codesCopySec = 0.0;
+        double indicesReadSec = 0.0;
+        double indicesCopySec = 0.0;
+
+        auto copyFileToDeviceTimed = [&](
+            std::ifstream& in,
+            uint8_t* dst,
+            size_t totalBytes,
+            double& readSec,
+            double& copySec) {
+            size_t offset = 0;
+            if (pinnedBuf && pinnedSize > 0) {
+            while (offset < totalBytes) {
+                size_t chunk = std::min(pinnedSize, totalBytes - offset);
+                auto t0 = std::chrono::high_resolution_clock::now();
+                in.read(reinterpret_cast<char*>(pinnedBuf), chunk);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                FAISS_THROW_IF_NOT_FMT(
+                    in.good(),
+                    "failed reading %zu bytes from cache",
+                    chunk);
+
+                readSec += std::chrono::duration<double>(t1 - t0).count();
+
+                auto t2 = std::chrono::high_resolution_clock::now();
+                CUDA_VERIFY(cudaMemcpyAsync(
+                    dst + offset,
+                    pinnedBuf,
+                    chunk,
+                    cudaMemcpyHostToDevice,
+                    copyStream));
+                CUDA_VERIFY(cudaStreamSynchronize(copyStream));
+                auto t3 = std::chrono::high_resolution_clock::now();
+
+                copySec += std::chrono::duration<double>(t3 - t2).count();
+                offset += chunk;
+            }
+            } else {
+            std::vector<uint8_t> temp(
+                std::min<size_t>(256 * 1024 * 1024, totalBytes));
+            while (offset < totalBytes) {
+                size_t chunk = std::min(temp.size(), totalBytes - offset);
+                auto t0 = std::chrono::high_resolution_clock::now();
+                in.read(reinterpret_cast<char*>(temp.data()), chunk);
+                auto t1 = std::chrono::high_resolution_clock::now();
+                FAISS_THROW_IF_NOT_FMT(
+                    in.good(),
+                    "failed reading %zu bytes from cache",
+                    chunk);
+
+                readSec += std::chrono::duration<double>(t1 - t0).count();
+
+                auto t2 = std::chrono::high_resolution_clock::now();
+                CUDA_VERIFY(cudaMemcpyAsync(
+                    dst + offset,
+                    temp.data(),
+                    chunk,
+                    cudaMemcpyHostToDevice,
+                    copyStream));
+                CUDA_VERIFY(cudaStreamSynchronize(copyStream));
+                auto t3 = std::chrono::high_resolution_clock::now();
+
+                copySec += std::chrono::duration<double>(t3 - t2).count();
+                offset += chunk;
+            }
+            }
+        };
+
+        if (useMmap) {
+            auto mapped = mapFileReadOnly(codesPath);
+            if (mapped.data && mapped.size == totalGpuBytes) {
+                madvise(mapped.data, mapped.size, MADV_WILLNEED);
+                size_t offset = 0;
+                size_t chunkSize = pinnedSize > 0 ? pinnedSize : (256 * 1024 * 1024);
+                while (offset < totalGpuBytes) {
+                    size_t chunk = std::min(chunkSize, totalGpuBytes - offset);
+                    auto t2 = std::chrono::high_resolution_clock::now();
+                    CUDA_VERIFY(cudaMemcpyAsync(
+                            packedListData_.data() + offset,
+                            static_cast<uint8_t*>(mapped.data) + offset,
+                            chunk,
+                            cudaMemcpyHostToDevice,
+                            copyStream));
+                    CUDA_VERIFY(cudaStreamSynchronize(copyStream));
+                    auto t3 = std::chrono::high_resolution_clock::now();
+                    codesCopySec += std::chrono::duration<double>(t3 - t2).count();
+                    offset += chunk;
+                }
+                unmapFile(mapped);
+            } else {
+                if (mapped.data) {
+                    unmapFile(mapped);
+                }
+                copyFileToDeviceTimed(
+                        codesIn,
+                        packedListData_.data(),
+                        totalGpuBytes,
+                        codesReadSec,
+                        codesCopySec);
+            }
+        } else {
+            copyFileToDeviceTimed(
+                    codesIn,
+                    packedListData_.data(),
+                    totalGpuBytes,
+                    codesReadSec,
+                    codesCopySec);
+        }
+
+        bool indicesCacheOk = false;
+        std::ifstream indicesIn;
+        std::ofstream indicesOut;
+        if ((indicesOptions_ == INDICES_32_BIT ||
+             indicesOptions_ == INDICES_64_BIT) &&
+            totalIndexBytes > 0) {
+            indicesIn.open(indicesPath, std::ios::binary | std::ios::ate);
+            if (indicesIn.good()) {
+                auto size = static_cast<size_t>(indicesIn.tellg());
+                if (size == totalIndexBytes) {
+                    indicesCacheOk = true;
+                    indicesIn.seekg(0, std::ios::beg);
+                }
+            }
+        }
+
+        if (packedDebugEnv) {
+            std::cerr << "[faiss] packed_lists indicesCacheOk=" << indicesCacheOk
+                      << " totalIndexBytes=" << totalIndexBytes << "\n";
+        }
+
+        if (indicesCacheOk) {
+                packedListIndices_.resize(totalIndexBytes, copyStream);
+            if (useMmap) {
+                auto mapped = mapFileReadOnly(indicesPath);
+                if (mapped.data && mapped.size == totalIndexBytes) {
+                    madvise(mapped.data, mapped.size, MADV_WILLNEED);
+                    size_t offset = 0;
+                    size_t chunkSize = pinnedSize > 0 ? pinnedSize : (256 * 1024 * 1024);
+                    while (offset < totalIndexBytes) {
+                        size_t chunk = std::min(chunkSize, totalIndexBytes - offset);
+                        auto t2 = std::chrono::high_resolution_clock::now();
+                        CUDA_VERIFY(cudaMemcpyAsync(
+                                packedListIndices_.data() + offset,
+                                static_cast<uint8_t*>(mapped.data) + offset,
+                                chunk,
+                                cudaMemcpyHostToDevice,
+                                copyStream));
+                        CUDA_VERIFY(cudaStreamSynchronize(copyStream));
+                        auto t3 = std::chrono::high_resolution_clock::now();
+                        indicesCopySec +=
+                                std::chrono::duration<double>(t3 - t2).count();
+                        offset += chunk;
+                    }
+                    unmapFile(mapped);
+                } else {
+                    if (mapped.data) {
+                        unmapFile(mapped);
+                    }
+                    copyFileToDeviceTimed(
+                            indicesIn,
+                            packedListIndices_.data(),
+                            totalIndexBytes,
+                            indicesReadSec,
+                            indicesCopySec);
+                }
+            } else {
+                copyFileToDeviceTimed(
+                        indicesIn,
+                        packedListIndices_.data(),
+                        totalIndexBytes,
+                        indicesReadSec,
+                        indicesCopySec);
+            }
+        } else if (indicesOptions_ == INDICES_32_BIT ||
+                   indicesOptions_ == INDICES_64_BIT) {
+            if (totalIndexBytes > 0) {
+                indicesOut.open(
+                        indicesPath, std::ios::binary | std::ios::trunc);
+            }
+            packedListIndices_.resize(totalIndexBytes, copyStream);
+
+            for (idx_t i = 0; i < nlist; ++i) {
+                if (listSizes[i] == 0) {
+                    continue;
+                }
+
+                if (indicesOptions_ == INDICES_32_BIT) {
+                    std::vector<int> indices32(listSizes[i]);
+                    auto ids = ivf->get_ids(i);
+                    for (idx_t j = 0; j < listSizes[i]; ++j) {
+                        auto ind = ids[j];
+                        FAISS_ASSERT(
+                                ind <=
+                                (idx_t)std::numeric_limits<int>::max());
+                        indices32[j] = (int)ind;
+                    }
+
+                        CUDA_VERIFY(cudaMemcpyAsync(
+                            packedListIndices_.data() +
+                                    listIndexOffsets[i],
+                            indices32.data(),
+                            listSizes[i] * sizeof(int),
+                            cudaMemcpyHostToDevice,
+                            copyStream));
+                        if (indicesOut.good()) {
+                        indicesOut.write(
+                            reinterpret_cast<const char*>(
+                                indices32.data()),
+                            listSizes[i] * sizeof(int));
+                        }
+                } else {
+                    CUDA_VERIFY(cudaMemcpyAsync(
+                            packedListIndices_.data() +
+                                    listIndexOffsets[i],
+                            ivf->get_ids(i),
+                            listSizes[i] * sizeof(idx_t),
+                            cudaMemcpyHostToDevice,
+                            copyStream));
+                        if (indicesOut.good()) {
+                        indicesOut.write(
+                            reinterpret_cast<const char*>(
+                                ivf->get_ids(i)),
+                            listSizes[i] * sizeof(idx_t));
+                        }
+                }
+            }
+        }
+
         for (idx_t i = 0; i < nlist; ++i) {
-            auto numVecs = listSizes[i];
-            if (numVecs == 0) {
+            if (listSizes[i] == 0) {
                 continue;
             }
 
-            auto gpuListSizeInBytes = getGpuVectorsEncodingSize_(numVecs);
-            addEncodedGpuVectorsToList_(
+            deviceListDataPointers_.setAt(
                     i,
-                    allGpuCodes.data() + offset,
-                    gpuListSizeInBytes,
-                    ivf->get_ids(i),
-                    numVecs);
-            offset += gpuListSizeInBytes;
+                    (void*)(packedListData_.data() + listOffsets[i]),
+                    copyStream);
+            deviceListLengths_.setAt(i, listSizes[i], copyStream);
+            deviceListData_[i]->numVecs = listSizes[i];
+            maxListLength_ = std::max(maxListLength_, listSizes[i]);
+
+            if ((indicesOptions_ == INDICES_32_BIT ||
+                 indicesOptions_ == INDICES_64_BIT) &&
+                totalIndexBytes > 0) {
+                deviceListIndexPointers_.setAt(
+                        i,
+                        (void*)(packedListIndices_.data() +
+                                listIndexOffsets[i]),
+                        copyStream);
+                deviceListIndices_[i]->numVecs = listSizes[i];
+            }
         }
 
+        packedLists_ = true;
+        packedListCodeOffsets_ = listOffsets;
+        packedListIndexOffsets_ = listIndexOffsets;
+
+        if (packedDebugEnv) {
+            auto toGb = [](size_t bytes) {
+                return static_cast<double>(bytes) /
+                        (1024.0 * 1024.0 * 1024.0);
+            };
+
+            if (totalGpuBytes > 0) {
+                std::cerr << "[faiss] packed_lists codes read GB/s="
+                          << (toGb(totalGpuBytes) /
+                              std::max(1e-9, codesReadSec))
+                          << " copy GB/s="
+                          << (toGb(totalGpuBytes) /
+                              std::max(1e-9, codesCopySec))
+                          << "\n";
+            }
+            if (totalIndexBytes > 0) {
+                std::cerr << "[faiss] packed_lists indices read GB/s="
+                          << (toGb(totalIndexBytes) /
+                              std::max(1e-9, indicesReadSec))
+                          << " copy GB/s="
+                          << (toGb(totalIndexBytes) /
+                              std::max(1e-9, indicesCopySec))
+                          << "\n";
+            }
+            std::cerr << "[faiss] packed_lists enabled; bulk upload complete\n";
+        }
+        streamWait({defaultStream}, {copyStream});
         return;
     }
 
-    std::ofstream out;
+    std::ofstream codesOut;
+    std::ofstream indicesOut;
+
     if (totalGpuBytes > 0) {
-        out.open(gpuCodesPath, std::ios::binary | std::ios::trunc);
+        codesOut.open(codesPath, std::ios::binary | std::ios::trunc);
+    }
+    if ((indicesOptions_ == INDICES_32_BIT ||
+         indicesOptions_ == INDICES_64_BIT) &&
+        totalIndexBytes > 0) {
+        indicesOut.open(indicesPath, std::ios::binary | std::ios::trunc);
+    }
+
+    if (!metaLoaded) {
+        writePackedMeta(
+                metaPath,
+                nlist,
+                indicesOptions_,
+                listSizes,
+                listOffsets,
+                listIndexOffsets,
+                totalGpuBytes,
+                totalIndexBytes);
     }
 
     for (idx_t i = 0; i < nlist; ++i) {
@@ -395,9 +1014,7 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
 
         std::vector<uint8_t> codesV(cpuListSizeInBytes);
         std::memcpy(codesV.data(), ivf->get_codes(i), cpuListSizeInBytes);
-        auto translatedCodes =
-                translateCodesToGpu_(std::move(codesV), numVecs);
-        FAISS_ASSERT(translatedCodes.size() == gpuListSizeInBytes);
+        auto translatedCodes = translateCodesToGpu_(std::move(codesV), numVecs);
 
         addEncodedGpuVectorsToList_(
                 i,
@@ -406,9 +1023,30 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                 ivf->get_ids(i),
                 numVecs);
 
-        if (out.good()) {
-            out.write(reinterpret_cast<const char*>(translatedCodes.data()),
-                      gpuListSizeInBytes);
+        if (codesOut.good()) {
+            codesOut.write(
+                    reinterpret_cast<const char*>(translatedCodes.data()),
+                    gpuListSizeInBytes);
+        }
+
+        if (indicesOut.good()) {
+            if (indicesOptions_ == INDICES_32_BIT) {
+                std::vector<int> indices32(numVecs);
+                auto ids = ivf->get_ids(i);
+                for (idx_t j = 0; j < numVecs; ++j) {
+                    auto ind = ids[j];
+                    FAISS_ASSERT(
+                            ind <= (idx_t)std::numeric_limits<int>::max());
+                    indices32[j] = (int)ind;
+                }
+                indicesOut.write(
+                        reinterpret_cast<const char*>(indices32.data()),
+                        numVecs * sizeof(int));
+            } else {
+                indicesOut.write(
+                        reinterpret_cast<const char*>(ivf->get_ids(i)),
+                        numVecs * sizeof(idx_t));
+            }
         }
     }
 }
@@ -432,6 +1070,9 @@ void IVFBase::addEncodedVectorsToList_(
         const void* codes,
         const idx_t* indices,
         idx_t numVecs) {
+        FAISS_THROW_IF_NOT_MSG(
+            !packedLists_,
+            "cannot append to packed IVF lists");
     auto stream = resources_->getDefaultStreamCurrentDevice();
 
     // This list must already exist
@@ -456,21 +1097,25 @@ void IVFBase::addEncodedVectorsToList_(
     std::memcpy(codesV.data(), codes, cpuListSizeInBytes);
     auto translatedCodes = translateCodesToGpu_(std::move(codesV), numVecs);
 
-        addEncodedGpuVectorsToList_(
+    addEncodedGpuVectorsToList_(
             listId,
             translatedCodes.data(),
             gpuListSizeInBytes,
             indices,
             numVecs);
-    }
+}
 
-    void IVFBase::addEncodedGpuVectorsToList_(
+void IVFBase::addEncodedGpuVectorsToList_(
         idx_t listId,
         const uint8_t* gpuCodes,
         size_t gpuListSizeInBytes,
         const idx_t* indices,
         idx_t numVecs) {
-        auto stream = resources_->getDefaultStreamCurrentDevice();
+    FAISS_THROW_IF_NOT_MSG(
+            !packedLists_,
+            "cannot append to packed IVF lists");
+
+    auto stream = resources_->getDefaultStreamCurrentDevice();
 
         // This list must already exist
         FAISS_ASSERT(listId < deviceListData_.size());
@@ -481,32 +1126,35 @@ void IVFBase::addEncodedVectorsToList_(
         FAISS_ASSERT(listCodes->numVecs == 0);
 
         // If there's nothing to add, then there's nothing we have to do
-        if (numVecs == 0) {
+    if (numVecs == 0) {
         return;
-        }
+    }
 
-        listCodes->data.append(
+    listCodes->data.append(
             gpuCodes,
             gpuListSizeInBytes,
             stream,
             true /* exact reserved size */);
-        listCodes->numVecs = numVecs;
+    listCodes->numVecs = numVecs;
 
         // Handle the indices as well
-        addIndicesFromCpu_(listId, indices, numVecs);
+    addIndicesFromCpu_(listId, indices, numVecs);
 
-        deviceListDataPointers_.setAt(
+    deviceListDataPointers_.setAt(
             listId, (void*)listCodes->data.data(), stream);
-        deviceListLengths_.setAt(listId, numVecs, stream);
+    deviceListLengths_.setAt(listId, numVecs, stream);
 
         // We update this as well, since the multi-pass algorithm uses it
-        maxListLength_ = std::max(maxListLength_, numVecs);
+    maxListLength_ = std::max(maxListLength_, numVecs);
 }
 
 void IVFBase::addIndicesFromCpu_(
         idx_t listId,
         const idx_t* indices,
         idx_t numVecs) {
+        FAISS_THROW_IF_NOT_MSG(
+            !packedLists_,
+            "cannot append indices to packed IVF lists");
     auto stream = resources_->getDefaultStreamCurrentDevice();
 
     // This list must currently be empty
@@ -705,6 +1353,9 @@ idx_t IVFBase::addVectors(
         Index* coarseQuantizer,
         Tensor<float, 2, true>& vecs,
         Tensor<idx_t, 1, true>& indices) {
+        FAISS_THROW_IF_NOT_MSG(
+            !packedLists_,
+            "cannot add vectors to packed IVF lists");
     FAISS_ASSERT(vecs.getSize(0) == indices.getSize(0));
     FAISS_ASSERT(vecs.getSize(1) == dim_);
 
