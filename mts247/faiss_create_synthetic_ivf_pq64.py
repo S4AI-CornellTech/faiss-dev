@@ -94,7 +94,7 @@ def main():
     parser.add_argument("--index-size", required=True, type=str)
     parser.add_argument("--dim", required=True, type=int)
     parser.add_argument("--threads", type=int, default=70)
-    parser.add_argument("--output-dir", type=str, default="/data/faiss")
+    parser.add_argument("--output-dir", type=str, default=".")
     args = parser.parse_args()
 
     total_vectors = parse_total_index_size(args.index_size)

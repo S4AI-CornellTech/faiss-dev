@@ -132,7 +132,7 @@ def main():
         help="Number of FAISS threads to use (default: 5)"
     )
     parser.add_argument(
-        "--output-dir", type=str, default="/data/faiss",
+        "--output-dir", type=str, default=".",
         help="Directory where the indices will be saved"
     )
     args = parser.parse_args()
