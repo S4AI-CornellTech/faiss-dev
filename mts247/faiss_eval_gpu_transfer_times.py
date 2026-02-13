@@ -11,12 +11,12 @@ from tqdm import tqdm
 # ==============================================================
 # Config
 # ==============================================================
-INDEX_PATH = "/home/nvidia/Desktop/ivf_100m_sq8.faiss"
+INDEX_PATH = "/home/nvidia/Desktop/ivf_100m_pq64.faiss"
 QUERY_PATH = "/home/nvidia/Desktop/triviaqa_encodings.npy"
 TRIALS = 100
 K = 5
 NPROBE = 256
-NUM_QUERIES = 1000  # limit queries for repeatable timing
+NUM_QUERIES = 100  # limit queries for repeatable timing
 
 USE_UNIFIED_MEMORY = False  # Set True only if you need UM capacity
 PINNED_MEM_BYTES = 2 * 1024 * 1024 * 1024  # Large pinned staging improves H2D
@@ -113,10 +113,14 @@ def main():
         gpu_times.append(gpu_load)
 
         t_search_start = time.perf_counter()
-        gpu_index.search(queries, K)
+        distances, indices = gpu_index.search(queries, K)
         cuda_sync(res)
         t_search_end = time.perf_counter()
         search_times.append(t_search_end - t_search_start)
+
+        # print("Top K Document IDs:")
+        # for i, search_result in enumerate(indices):
+        #     print(f"Query {i}: {search_result}")
 
         # Release GPU index to avoid accumulating allocations
         del gpu_index
