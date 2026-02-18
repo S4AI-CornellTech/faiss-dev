@@ -5,19 +5,25 @@ import time
 import faiss
 import numpy as np
 from tqdm import tqdm
+import multiprocessing
 
 # === Config ===
-index_size      = "100m"
-INDEX_NAME = f"/home/nvidia/Desktop/ivf_{index_size}.faiss"
-QUERY_FILE = "/home/nvidia/Desktop/triviaqa_encodings.npy"
-OUTPUT_FILE = f"/home/nvidia/Desktop/cpu_retrieval_test.csv"
+index_size         = "100m"
+index_quantization = "pq64"
+INDEX_NAME = f"ivf_{index_size}_{index_quantization}.faiss"
+QUERY_FILE = "triviaqa_encodings.npy"
+OUTPUT_FILE = f"data/cpu_retrieval_test_ivf_{index_size}_{index_quantization}.csv"
 
-NPROBE          = 256         # scalar
-BATCH_SIZE      = 32         # scalar
-RETRIEVED_DOCS  = 5           # scalar (top-k)
-MAX_BATCHES     = 100        # measured batches (after warmup)
-WARMUP_BATCHES  = 5           # unmeasured warmup batches
-THREAD_RANGE    = (32, 33)     # inclusive
+# Lists of parameters to iterate through
+NPROBE_LIST          = [64, 128, 256, 512]         # list of nprobe values
+BATCH_SIZE_LIST      = [16, 32, 64, 128]          # list of batch sizes
+RETRIEVED_DOCS_LIST  = [1, 5, 10, 25]             # list of top-k values
+
+MAX_BATCHES     = 1000        # measured batches (after warmup)
+WARMUP_BATCHES  = 10           # unmeasured warmup batches
+
+# Automatically detect all available threads
+NUM_THREADS = multiprocessing.cpu_count()
 
 # === Helpers ===
 def load_faiss_cpu_index(index_path, nprobe):
@@ -68,8 +74,10 @@ def main():
     queries = np.load(QUERY_FILE).astype(np.float32)
     queries = np.ascontiguousarray(queries)
 
-    print(f"[INFO] Loading CPU index: {INDEX_NAME} (nprobe={NPROBE})")
-    index = load_faiss_cpu_index(INDEX_NAME, NPROBE)
+    print(f"[INFO] Detected {NUM_THREADS} CPU threads")
+    
+    # Set FAISS to use all available threads
+    faiss.omp_set_num_threads(NUM_THREADS)
 
     # Prepare CSV
     fieldnames = ["threads", "nprobe", "batch_size", "retrieved_docs", "avg_query_time"]
@@ -77,31 +85,43 @@ def main():
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
-        # Sweep threads from 1 .. 72 (inclusive)
-        t_min, t_max = THREAD_RANGE
-        for t in range(t_min, t_max + 1):
-            # Set FAISS OpenMP thread count
-            faiss.omp_set_num_threads(int(t))
+        # Calculate total iterations for progress tracking
+        total_iterations = len(NPROBE_LIST) * len(BATCH_SIZE_LIST) * len(RETRIEVED_DOCS_LIST)
+        current_iteration = 0
 
-            print(f"[RUN] threads={t} | warmup={WARMUP_BATCHES} | measure={MAX_BATCHES} | "
-                  f"bs={BATCH_SIZE} | k={RETRIEVED_DOCS}")
+        # Iterate through all combinations of parameters
+        for nprobe in NPROBE_LIST:
+            # Load index with current nprobe setting
+            print(f"\n[INFO] Loading CPU index with nprobe={nprobe}")
+            index = load_faiss_cpu_index(INDEX_NAME, nprobe)
+            
+            for batch_size in BATCH_SIZE_LIST:
+                for retrieved_docs in RETRIEVED_DOCS_LIST:
+                    current_iteration += 1
+                    
+                    print(f"\n[RUN {current_iteration}/{total_iterations}] "
+                          f"threads={NUM_THREADS} | nprobe={nprobe} | "
+                          f"batch_size={batch_size} | k={retrieved_docs} | "
+                          f"warmup={WARMUP_BATCHES} | measure={MAX_BATCHES}")
 
-            # Warmup (unmeasured)
-            warmup(index, RETRIEVED_DOCS, queries, BATCH_SIZE, WARMUP_BATCHES)
+                    # Warmup (unmeasured)
+                    warmup(index, retrieved_docs, queries, batch_size, WARMUP_BATCHES)
 
-            # Measure
-            avg_batch_time_s = measure(index, RETRIEVED_DOCS, queries, BATCH_SIZE, MAX_BATCHES)
+                    # Measure
+                    avg_batch_time_s = measure(index, retrieved_docs, queries, batch_size, MAX_BATCHES)
 
-            writer.writerow({
-                "threads": t,
-                "nprobe": NPROBE,
-                "batch_size": BATCH_SIZE,
-                "retrieved_docs": RETRIEVED_DOCS,
-                "avg_query_time": avg_batch_time_s
-            })
-            f.flush()  # ensure progress hits disk each iteration
+                    writer.writerow({
+                        "threads": NUM_THREADS,
+                        "nprobe": nprobe,
+                        "batch_size": batch_size,
+                        "retrieved_docs": retrieved_docs,
+                        "avg_query_time": avg_batch_time_s
+                    })
+                    f.flush()  # ensure progress hits disk each iteration
+                    
+                    print(f"[RESULT] {avg_batch_time_s:.6f}s avg per batch")
 
-    print(f"[DONE] Wrote per-thread results to {OUTPUT_FILE}")
+    print(f"\n[DONE] Wrote {total_iterations} results to {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     # Verbosity can help confirm FAISS is using OMP on CPU
