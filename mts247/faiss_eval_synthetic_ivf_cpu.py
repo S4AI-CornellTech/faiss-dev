@@ -9,7 +9,7 @@ import multiprocessing
 
 # === Config ===
 index_size         = "100m"
-index_quantization = "pq64"
+index_quantization = "sq8"
 INDEX_NAME = f"ivf_{index_size}_{index_quantization}.faiss"
 QUERY_FILE = "triviaqa_encodings.npy"
 OUTPUT_FILE = f"data/cpu_retrieval_test_ivf_{index_size}_{index_quantization}.csv"
