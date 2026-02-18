@@ -13,7 +13,7 @@ from tqdm import tqdm
 # Config
 # ==============================================================
 INDEX_SIZE = "100m"
-INDEX_QUANTIZATION = "sq8"
+INDEX_QUANTIZATION = "pq64"
 
 INDEX_PATH = f"ivf_{INDEX_SIZE}_{INDEX_QUANTIZATION}.faiss"
 QUERY_PATH = "triviaqa_encodings.npy"

@@ -289,8 +289,18 @@ std::pair<double,double> uploadToDevice(
         bool profile) {
     if (totalBytes == 0) return {0.0, 0.0};
     auto t0 = std::chrono::high_resolution_clock::now();
-    CUDA_VERIFY(cudaMemcpyAsync(
-            dst, src, totalBytes, cudaMemcpyHostToDevice, stream));
+    // Chunked copy to avoid large single DMA transfers hanging on some GPUs.
+    size_t offset = 0;
+    while (offset < totalBytes) {
+        size_t chunk = std::min(kFallbackChunkBytes, totalBytes - offset);
+        CUDA_VERIFY(cudaMemcpyAsync(
+                dst + offset,
+                src + offset,
+                chunk,
+                cudaMemcpyHostToDevice,
+                stream));
+        offset += chunk;
+    }
     CUDA_VERIFY(cudaStreamSynchronize(stream));
     double copySec = profile
             ? std::chrono::duration<double>(
@@ -869,12 +879,20 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
         }
 
         if (codesCacheOk && usePacked && metaLoaded) {
+            // Reset state to avoid stale pointers/state across repeated loads.
+            reset();
+
             auto pinnedAlloc  = resources_->getPinnedMemory();
             auto* pinnedBuf   = static_cast<uint8_t*>(pinnedAlloc.first);
             size_t pinnedSize = pinnedAlloc.second;
 
             auto copyStream   = resources_->getAsyncCopyStreamCurrentDevice();
             auto defaultStream = resources_->getDefaultStreamCurrentDevice();
+
+            // Clear previous allocations to prevent GPU memory corruption when
+            // reusing DeviceVector across trials with pinned mmap caching
+            packedListData_.clear();
+            packedListIndices_.clear();
 
             // ------------------------------------------------------------------
             // Allocate GPU buffers for codes and indices.
@@ -1084,6 +1102,9 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                     t_indices_upload = elapsedSec(t0u, now());
                 }
 
+                // Ensure default stream waits for indices upload before
+                // we destroy the stream and before any search work begins.
+                streamWait({defaultStream}, {indexStream});
                 CUDA_VERIFY(cudaStreamDestroy(indexStream));
 
                 // ------------------------------------------------------------------
@@ -1122,6 +1143,21 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                 packedListCodeOffsets_  = listOffsets;
                 packedListIndexOffsets_ = listIndexOffsets;
 
+                // Update list sizes and max list length for packed lists.
+                maxListLength_ = 0;
+                for (idx_t i = 0; i < nlist; ++i) {
+                    auto sz = listSizes[i];
+                    if (sz > maxListLength_) {
+                        maxListLength_ = sz;
+                    }
+                    if (i < (idx_t)deviceListData_.size()) {
+                        deviceListData_[i]->numVecs = sz;
+                    }
+                    if (i < (idx_t)deviceListIndices_.size()) {
+                        deviceListIndices_[i]->numVecs = sz;
+                    }
+                }
+
                 if (packedDebugEnv) {
                     auto toGb = [](size_t bytes) {
                         return static_cast<double>(bytes) / (1024.0*1024.0*1024.0);
@@ -1148,6 +1184,15 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                     streamWait({defaultStream}, {copyStream});
                     t_stream_sync = elapsedSec(t0s, now());
                 }
+
+                // Ensure any search work on alternate streams waits for the
+                // default stream (which already waits on the upload stream).
+                auto altStreams = resources_->getAlternateStreamsCurrentDevice();
+                streamWait(altStreams, {defaultStream});
+
+                // Ensure all default-stream work (including pointer updates
+                // and waits on copy/index streams) is complete before returning.
+                CUDA_VERIFY(cudaStreamSynchronize(defaultStream));
 
                 if (profile) {
                     auto totalSec = elapsedSec(t_all_start, now());
