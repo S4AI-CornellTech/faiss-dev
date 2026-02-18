@@ -1,0 +1,4 @@
+Buffer size GB: 8
+Iterations: 10 (warmup 2)
+H2D avg GB/s: 318.695
+D2H avg GB/s: 258.649

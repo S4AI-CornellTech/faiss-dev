@@ -1,0 +1,4 @@
+Vectors: 16384
+Dimension: 768
+Average time per full 16K cosine pass: 0.10368 us
+Approx GFLOPs: 485452
