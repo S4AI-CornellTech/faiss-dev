@@ -12,10 +12,10 @@ from tqdm import tqdm
 # ==============================================================
 # Config
 # ==============================================================
-INDEX_SIZE = "100m"
+INDEX_SIZE = "10m"
 INDEX_QUANTIZATION = "sq8"
 
-INDEX_PATH = f"ivf_{INDEX_SIZE}_{INDEX_QUANTIZATION}.faiss"
+INDEX_PATH = f"indices/ivf_{INDEX_SIZE}_{INDEX_QUANTIZATION}.faiss"
 QUERY_PATH = "triviaqa_encodings.npy"
 TRIALS = 100
 K = 5
@@ -184,7 +184,7 @@ def main():
     # ----------------------------------------------------------
     os.makedirs("data", exist_ok=True)
 
-    output_path = f"data/TRANSFER_TIMES_{INDEX_SIZE}_{INDEX_QUANTIZATION}.csv"
+    output_path = f"data/ENHANCED_TRANSFER_TIMES_{INDEX_SIZE}_{INDEX_QUANTIZATION}.csv"
 
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
