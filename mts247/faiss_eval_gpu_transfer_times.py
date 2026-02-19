@@ -12,7 +12,7 @@ from tqdm import tqdm
 # ==============================================================
 # Config
 # ==============================================================
-INDEX_SIZE = "10m"
+INDEX_SIZE = "100m"
 INDEX_QUANTIZATION = "sq8"
 
 INDEX_PATH = f"indices/ivf_{INDEX_SIZE}_{INDEX_QUANTIZATION}.faiss"
@@ -184,7 +184,7 @@ def main():
     # ----------------------------------------------------------
     os.makedirs("data", exist_ok=True)
 
-    output_path = f"data/ENHANCED_TRANSFER_TIMES_{INDEX_SIZE}_{INDEX_QUANTIZATION}.csv"
+    output_path = f"data/transfers/ENHANCED_TRANSFER_TIMES_{INDEX_SIZE}_{INDEX_QUANTIZATION}.csv"
 
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)

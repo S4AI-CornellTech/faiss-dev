@@ -8,16 +8,15 @@ from tqdm import tqdm
 import multiprocessing
 
 # === Config ===
-index_size         = "100m"
 index_quantization = "sq8"
-INDEX_NAME = f"ivf_{index_size}_{index_quantization}.faiss"
 QUERY_FILE = "triviaqa_encodings.npy"
-OUTPUT_FILE = f"data/cpu_retrieval_test_ivf_{index_size}_{index_quantization}.csv"
+OUTPUT_FILE = f"data/cpu_retrieval_test_ivf_sq8.csv"
 
 # Lists of parameters to iterate through
-NPROBE_LIST          = [64, 128, 256, 512]         # list of nprobe values
-BATCH_SIZE_LIST      = [16, 32, 64, 128]          # list of batch sizes
-RETRIEVED_DOCS_LIST  = [1, 5, 10, 25]             # list of top-k values
+NPROBE_LIST          = [256]         # list of nprobe values
+BATCH_SIZE_LIST      = [32]          # list of batch sizes
+RETRIEVED_DOCS_LIST  = [5]             # list of top-k values
+INDEX_SIZE_LIST      = ["10m", "20m", "30m", "40m", "50m", "60m", "70m", "80m", "90m", "100m"]
 
 MAX_BATCHES     = 1000        # measured batches (after warmup)
 WARMUP_BATCHES  = 10           # unmeasured warmup batches
@@ -80,7 +79,7 @@ def main():
     faiss.omp_set_num_threads(NUM_THREADS)
 
     # Prepare CSV
-    fieldnames = ["threads", "nprobe", "batch_size", "retrieved_docs", "avg_query_time"]
+    fieldnames = ["index_size", "threads", "nprobe", "batch_size", "retrieved_docs", "avg_query_time"]
     with open(OUTPUT_FILE, mode="w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -90,36 +89,39 @@ def main():
         current_iteration = 0
 
         # Iterate through all combinations of parameters
-        for nprobe in NPROBE_LIST:
-            # Load index with current nprobe setting
-            print(f"\n[INFO] Loading CPU index with nprobe={nprobe}")
-            index = load_faiss_cpu_index(INDEX_NAME, nprobe)
-            
-            for batch_size in BATCH_SIZE_LIST:
-                for retrieved_docs in RETRIEVED_DOCS_LIST:
-                    current_iteration += 1
-                    
-                    print(f"\n[RUN {current_iteration}/{total_iterations}] "
-                          f"threads={NUM_THREADS} | nprobe={nprobe} | "
-                          f"batch_size={batch_size} | k={retrieved_docs} | "
-                          f"warmup={WARMUP_BATCHES} | measure={MAX_BATCHES}")
+        for index_size in INDEX_SIZE_LIST:
+            for nprobe in NPROBE_LIST:
+                # Load index with current nprobe setting
+                print(f"\n[INFO] Loading CPU index with nprobe={nprobe}")
+                index_name = f"indices/ivf_{index_size}_{index_quantization}.faiss"
+                index = load_faiss_cpu_index(index_name, nprobe)
+                
+                for batch_size in BATCH_SIZE_LIST:
+                    for retrieved_docs in RETRIEVED_DOCS_LIST:
+                        current_iteration += 1
+                        
+                        print(f"\n[RUN {current_iteration}/{total_iterations}] "
+                            f"index_size={index_size} | threads={NUM_THREADS} | nprobe={nprobe} | "
+                            f"batch_size={batch_size} | k={retrieved_docs} | "
+                            f"warmup={WARMUP_BATCHES} | measure={MAX_BATCHES}")
 
-                    # Warmup (unmeasured)
-                    warmup(index, retrieved_docs, queries, batch_size, WARMUP_BATCHES)
+                        # Warmup (unmeasured)
+                        warmup(index, retrieved_docs, queries, batch_size, WARMUP_BATCHES)
 
-                    # Measure
-                    avg_batch_time_s = measure(index, retrieved_docs, queries, batch_size, MAX_BATCHES)
+                        # Measure
+                        avg_batch_time_s = measure(index, retrieved_docs, queries, batch_size, MAX_BATCHES)
 
-                    writer.writerow({
-                        "threads": NUM_THREADS,
-                        "nprobe": nprobe,
-                        "batch_size": batch_size,
-                        "retrieved_docs": retrieved_docs,
-                        "avg_query_time": avg_batch_time_s
-                    })
-                    f.flush()  # ensure progress hits disk each iteration
-                    
-                    print(f"[RESULT] {avg_batch_time_s:.6f}s avg per batch")
+                        writer.writerow({
+                            "index_size": index_size,
+                            "threads": NUM_THREADS,
+                            "nprobe": nprobe,
+                            "batch_size": batch_size,
+                            "retrieved_docs": retrieved_docs,
+                            "avg_query_time": avg_batch_time_s
+                        })
+                        f.flush()  # ensure progress hits disk each iteration
+                        
+                        print(f"[RESULT] {avg_batch_time_s:.6f}s avg per batch")
 
     print(f"\n[DONE] Wrote {total_iterations} results to {OUTPUT_FILE}")
 
