@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -744,9 +745,20 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
         return;
     }
 
-    const std::string codesPath   = "/dev/shm/gpu_codes_all.bin";
-    const std::string indicesPath = "/dev/shm/gpu_indices_all.bin";
-    const std::string metaPath    = "/dev/shm/gpu_codes_all.meta";
+    const char* cachePathEnv = std::getenv("FAISS_GPU_PACKED_CACHE_PATH");
+    const std::string cachePath = cachePathEnv ? std::string(cachePathEnv) : "/dev/shm";
+    
+    // Create cache directory if it doesn't exist
+    try {
+        std::filesystem::create_directories(cachePath);
+    } catch (const std::exception& e) {
+        std::cerr << "[faiss] Warning: failed to create cache directory " << cachePath 
+                  << ": " << e.what() << "\n";
+    }
+    
+    const std::string codesPath   = cachePath + "/gpu_codes_all.bin";
+    const std::string indicesPath = cachePath + "/gpu_indices_all.bin";
+    const std::string metaPath    = cachePath + "/gpu_codes_all.meta";
 
     const char* packedEnv       = std::getenv("FAISS_GPU_PACKED_LISTS");
     const char* packedDebugEnv  = std::getenv("FAISS_GPU_PACKED_LISTS_DEBUG");

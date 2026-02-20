@@ -15,7 +15,7 @@ from tqdm import tqdm
 INDEX_SIZE = "100m"
 INDEX_QUANTIZATION = "sq8"
 
-INDEX_PATH = f"/data/indices/ivf_{INDEX_SIZE}_{INDEX_QUANTIZATION}.faiss"
+INDEX_PATH = f"/data/indices/{INDEX_QUANTIZATION}/ivf_{INDEX_SIZE}_{INDEX_QUANTIZATION}.faiss"
 QUERY_PATH = "triviaqa_encodings.npy"
 TRIALS = 100
 K = 5
@@ -104,6 +104,7 @@ def main():
     os.environ.setdefault("FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES", str(1 << 30))
     os.environ.setdefault("FAISS_GPU_PACKED_LISTS_PROFILE", "1")
     os.environ.setdefault("FAISS_GPU_PACKED_LISTS_DEBUG", "0")
+    os.environ.setdefault("FAISS_GPU_PACKED_CACHE_PATH", "/dev/shm/test")
 
     clear_dev_shm()
 
