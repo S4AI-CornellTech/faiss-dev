@@ -31,14 +31,22 @@ def generate_vectors(num_vectors, dim, queue):
 
 def create_faiss_index(total_vectors, dim, num_workers, num_vectors_per_batch):
     # -----------------------------
-    # IVF-PQ configuration
+    # Dynamic Square Root Config
     # -----------------------------
-    nlists = 16_000
+    # Set nlists to sqrt(N)
+    nlists = int(math.sqrt(total_vectors))
+    
     pq_m = 64          # PQ64
     pq_nbits = 8       # 8 bits per subquantizer
 
     if dim % pq_m != 0:
         raise ValueError(f"dim ({dim}) must be divisible by pq_m ({pq_m})")
+
+    # Set training size: min 256 * 10 (for PQ) and 40 * nlists (for IVF)
+    # Capping at 1M-2M is usually sufficient for synthetic uniform data
+    train_size = min(max(256 * 10, 40 * nlists), 1_000_000)
+    
+    print(f"Index Config: nlists={nlists}, pq_m={pq_m}, train_size={train_size}")
 
     quantizer = faiss.IndexFlatIP(dim)
     index = faiss.IndexIVFPQ(
@@ -53,7 +61,6 @@ def create_faiss_index(total_vectors, dim, num_workers, num_vectors_per_batch):
     # -----------------------------
     # Training
     # -----------------------------
-    train_size = max(100_000, 50 * nlists)
     print(f"Training IVF-PQ64 with {train_size} vectors...")
     train_vectors = np.random.uniform(
         -1.0, 1.0, size=(train_size, dim)
@@ -94,13 +101,13 @@ def main():
     parser.add_argument("--index-size", required=True, type=str)
     parser.add_argument("--dim", required=True, type=int)
     parser.add_argument("--threads", type=int, default=70)
-    parser.add_argument("--output-dir", type=str, default=".")
+    parser.add_argument("--output-dir", type=str, default="/data/indices")
     args = parser.parse_args()
 
     total_vectors = parse_total_index_size(args.index_size)
     faiss.omp_set_num_threads(args.threads)
 
-    print("Config:")
+    print("Global Config:")
     print(f"  vectors : {total_vectors}")
     print(f"  dim     : {args.dim}")
     print(f"  threads : {args.threads}")
