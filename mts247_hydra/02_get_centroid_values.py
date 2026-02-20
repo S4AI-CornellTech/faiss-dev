@@ -7,7 +7,7 @@ import os
 # CONFIG
 # ==============================================================
 INDEX_PATH = "/data/indices/hydra_ivf_500m_sq8.faiss"
-OUTPUT_PATH = "data/hydra_centroids.npy"
+OUTPUT_PATH = "/data/indices/hydra_centroids.npy"
 # ==============================================================
 
 def extract_ivf_index(index):
