@@ -15,23 +15,30 @@ def generate_vectors(num_vectors, dim, queue):
     queue.put(vectors)
 
 def build_single_index(target_count, dim, num_workers, output_dir):
-    """Builds a completely fresh index optimized for the target_count."""
+    """Builds an IVF-PQ64 index optimized for the target_count."""
     
-    # 1. Calculate nlists based on the specific sqrt of this index size
+    # 1. Config & Validation
     nlists = int(math.sqrt(target_count))
-    # FAISS recommends 30-100 points per centroid for training
-    train_size = min(40 * nlists, target_count, 1_000_000)
+    pq_m = 64
+    pq_nbits = 8
+    
+    if dim % pq_m != 0:
+        raise ValueError(f"Dimension {dim} must be divisible by pq_m ({pq_m})")
+
+    # PQ requires more training data than SQ8 to build a good codebook
+    # FAISS recommends at least 10x (2^nbits) per sub-quantizer
+    train_size = min(max(2560, 40 * nlists), target_count, 1_000_000)
     
     label = f"{target_count // 1_000_000}m"
-    filename = os.path.join(output_dir, f"ivf_{label}_sq8.faiss")
+    filename = os.path.join(output_dir, f"hydra_ivf_{label}_pq64.faiss")
     
-    print(f"\n--- Building {label} Index ---")
+    print(f"\n--- Building {label} PQ64 Index ---")
     print(f"Target: {target_count} | nlists: {nlists} | Training on: {train_size}")
 
     # 2. Initialize and Train
     quantizer = faiss.IndexFlatIP(dim)
-    index = faiss.IndexIVFScalarQuantizer(
-        quantizer, dim, nlists, faiss.ScalarQuantizer.QT_8bit, faiss.METRIC_INNER_PRODUCT
+    index = faiss.IndexIVFPQ(
+        quantizer, dim, nlists, pq_m, pq_nbits, faiss.METRIC_INNER_PRODUCT
     )
     
     print(f"Generating training data for {label}...")
@@ -51,7 +58,6 @@ def build_single_index(target_count, dim, num_workers, output_dir):
                 processes.append(p)
             
             vectors = queue.get()
-            # Handle if the last batch exceeds target
             if pbar.n + vectors.shape[0] > target_count:
                 vectors = vectors[:target_count - pbar.n]
                 
@@ -73,9 +79,11 @@ def main():
     parser.add_argument("--output-dir", type=str, default="/data/indices")
     args = parser.parse_args()
 
-    # Define all independent targets
-    targets = [i * 10_000_000 for i in range(1, 11)] # 10m, 20m... 100m
+    # Define all independent targets: 10m, 20m... 100m
+    targets = [5_000_000_000]
     
+    # Set FAISS internal threading
+    faiss.omp_set_num_threads(args.threads)
     os.makedirs(args.output_dir, exist_ok=True)
     
     for count in targets:

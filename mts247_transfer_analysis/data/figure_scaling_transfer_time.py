@@ -42,6 +42,8 @@ cpu_to_gpu = df["cpu_to_gpu_time"].values
 gpu_retrieval = df["gpu_retrieval_time"].values
 gpu_total = cpu_to_gpu + gpu_retrieval
 
+print(f"GPU Totals: {gpu_total}")
+
 # ==============================================================
 # Plot
 # ==============================================================

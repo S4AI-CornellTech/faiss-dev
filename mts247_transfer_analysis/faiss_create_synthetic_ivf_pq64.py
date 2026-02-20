@@ -76,7 +76,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dim", type=int, default=768)
     parser.add_argument("--threads", type=int, default=multiprocessing.cpu_count())
-    parser.add_argument("--output-dir", type=str, default="/data/indices")
+    parser.add_argument("--output-dir", type=str, default="/data/indices/pq64")
     args = parser.parse_args()
 
     # Define all independent targets: 10m, 20m... 100m
