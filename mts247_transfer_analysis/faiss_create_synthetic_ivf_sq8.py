@@ -75,7 +75,6 @@ def main():
 
     # Define all independent targets
     targets = [i * 10_000_000 for i in range(1, 11)] # 10m, 20m... 100m
-    targets.append(500_000_000) # Add the 500m final target
     
     os.makedirs(args.output_dir, exist_ok=True)
     

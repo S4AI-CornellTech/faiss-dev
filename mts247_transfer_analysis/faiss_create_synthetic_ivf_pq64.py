@@ -7,122 +7,87 @@ from tqdm import tqdm
 import multiprocessing
 import os
 
+# Fixed number of vectors generated per batch.
 NUM_VECTORS_PER_BATCH = 100_000
 
-def parse_total_index_size(size_str):
-    size_str = size_str.lower().strip()
-    if size_str.endswith("k"):
-        multiplier = 10**3
-        number_part = size_str[:-1]
-    elif size_str.endswith("m"):
-        multiplier = 10**6
-        number_part = size_str[:-1]
-    elif size_str.endswith("b"):
-        multiplier = 10**9
-        number_part = size_str[:-1]
-    else:
-        raise ValueError("Index size must end with k, m, or b")
-
-    return int(float(number_part) * multiplier)
-
 def generate_vectors(num_vectors, dim, queue):
-    vectors = np.random.uniform(-1.0, 1.0, size=(num_vectors, dim)).astype("float32")
+    vectors = np.random.uniform(low=-1.0, high=1.0, size=(num_vectors, dim)).astype('float32')
     queue.put(vectors)
 
-def create_faiss_index(total_vectors, dim, num_workers, num_vectors_per_batch):
-    # -----------------------------
-    # Dynamic Square Root Config
-    # -----------------------------
-    # Set nlists to sqrt(N)
-    nlists = int(math.sqrt(total_vectors))
+def build_single_index(target_count, dim, num_workers, output_dir):
+    """Builds an IVF-PQ64 index optimized for the target_count."""
     
-    pq_m = 64          # PQ64
-    pq_nbits = 8       # 8 bits per subquantizer
-
+    # 1. Config & Validation
+    nlists = int(math.sqrt(target_count))
+    pq_m = 64
+    pq_nbits = 8
+    
     if dim % pq_m != 0:
-        raise ValueError(f"dim ({dim}) must be divisible by pq_m ({pq_m})")
+        raise ValueError(f"Dimension {dim} must be divisible by pq_m ({pq_m})")
 
-    # Set training size: min 256 * 10 (for PQ) and 40 * nlists (for IVF)
-    # Capping at 1M-2M is usually sufficient for synthetic uniform data
-    train_size = min(max(256 * 10, 40 * nlists), 1_000_000)
+    # PQ requires more training data than SQ8 to build a good codebook
+    # FAISS recommends at least 10x (2^nbits) per sub-quantizer
+    train_size = min(max(2560, 40 * nlists), target_count, 1_000_000)
     
-    print(f"Index Config: nlists={nlists}, pq_m={pq_m}, train_size={train_size}")
+    label = f"{target_count // 1_000_000}m"
+    filename = os.path.join(output_dir, f"ivf_{label}_pq64.faiss")
+    
+    print(f"\n--- Building {label} PQ64 Index ---")
+    print(f"Target: {target_count} | nlists: {nlists} | Training on: {train_size}")
 
+    # 2. Initialize and Train
     quantizer = faiss.IndexFlatIP(dim)
     index = faiss.IndexIVFPQ(
-        quantizer,
-        dim,
-        nlists,
-        pq_m,
-        pq_nbits,
-        faiss.METRIC_INNER_PRODUCT,
+        quantizer, dim, nlists, pq_m, pq_nbits, faiss.METRIC_INNER_PRODUCT
     )
-
-    # -----------------------------
-    # Training
-    # -----------------------------
-    print(f"Training IVF-PQ64 with {train_size} vectors...")
-    train_vectors = np.random.uniform(
-        -1.0, 1.0, size=(train_size, dim)
-    ).astype("float32")
-    index.train(train_vectors)
-
-    # -----------------------------
-    # Parallel add
-    # -----------------------------
-    num_batches = math.ceil(total_vectors / num_vectors_per_batch)
+    
+    print(f"Generating training data for {label}...")
+    train_vecs = np.random.uniform(low=-1.0, high=1.0, size=(train_size, dim)).astype('float32')
+    index.train(train_vecs)
+    
+    # 3. Fill the index
+    num_batches = math.ceil(target_count / NUM_VECTORS_PER_BATCH)
     queue = multiprocessing.Queue(maxsize=num_workers)
     processes = []
-
-    print("Adding vectors...")
-    with tqdm(total=num_batches, unit="batch") as pbar:
+    
+    with tqdm(total=target_count, desc=f"Adding to {label}", unit="vec") as pbar:
         for _ in range(num_batches):
             if len(processes) < num_workers:
-                p = multiprocessing.Process(
-                    target=generate_vectors,
-                    args=(num_vectors_per_batch, dim, queue),
-                )
+                p = multiprocessing.Process(target=generate_vectors, args=(NUM_VECTORS_PER_BATCH, dim, queue))
                 p.start()
                 processes.append(p)
-
+            
             vectors = queue.get()
+            if pbar.n + vectors.shape[0] > target_count:
+                vectors = vectors[:target_count - pbar.n]
+                
             index.add(vectors)
-            pbar.update(1)
-
+            pbar.update(vectors.shape[0])
             processes = [p for p in processes if p.is_alive()]
 
-        for p in processes:
-            p.join()
-
-    return index
+    # 4. Save
+    print(f"Saving to {filename}...")
+    faiss.write_index(index, filename)
+    
+    for p in processes:
+        p.join()
 
 def main():
-    parser = argparse.ArgumentParser("FAISS IVF-PQ64 generator")
-    parser.add_argument("--index-size", required=True, type=str)
-    parser.add_argument("--dim", required=True, type=int)
-    parser.add_argument("--threads", type=int, default=70)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dim", type=int, default=768)
+    parser.add_argument("--threads", type=int, default=multiprocessing.cpu_count())
     parser.add_argument("--output-dir", type=str, default="/data/indices")
     args = parser.parse_args()
 
-    total_vectors = parse_total_index_size(args.index_size)
+    # Define all independent targets: 10m, 20m... 100m
+    targets = [i * 10_000_000 for i in range(1, 11)]
+    
+    # Set FAISS internal threading
     faiss.omp_set_num_threads(args.threads)
-
-    print("Global Config:")
-    print(f"  vectors : {total_vectors}")
-    print(f"  dim     : {args.dim}")
-    print(f"  threads : {args.threads}")
-
-    index = create_faiss_index(
-        total_vectors,
-        args.dim,
-        args.threads,
-        NUM_VECTORS_PER_BATCH,
-    )
-
     os.makedirs(args.output_dir, exist_ok=True)
-    out_path = f"{args.output_dir}/ivf_{args.index_size}_pq64.faiss"
-    faiss.write_index(index, out_path)
-    print(f"Saved index to {out_path}")
+    
+    for count in targets:
+        build_single_index(count, args.dim, args.threads, args.output_dir)
 
 if __name__ == "__main__":
     main()
