@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import math
 import numpy as np
 import faiss
@@ -6,86 +7,79 @@ from tqdm import tqdm
 import multiprocessing
 import os
 
-DIM = 768
-TOTAL_VECTORS = 500_000_000
+# Fixed number of vectors generated per batch.
 NUM_VECTORS_PER_BATCH = 100_000
-OUTPUT_FILE = "/data/indices/hydra_ivf_500m_sq8.faiss"
 
-def generate_vectors(num_vectors, dim):
-    return np.random.uniform(
-        low=-1.0, high=1.0,
-        size=(num_vectors, dim)
-    ).astype("float32")
+def generate_vectors(num_vectors, dim, queue):
+    vectors = np.random.uniform(low=-1.0, high=1.0, size=(num_vectors, dim)).astype('float32')
+    queue.put(vectors)
 
-def main():
+def build_single_index(target_count, dim, num_workers, output_dir):
+    """Builds a completely fresh index optimized for the target_count."""
+    
+    # 1. Calculate nlists based on the specific sqrt of this index size
+    nlists = int(math.sqrt(target_count))
+    # FAISS recommends 30-100 points per centroid for training
+    train_size = min(40 * nlists, target_count, 1_000_000)
+    
+    label = f"{target_count // 1_000_000}m"
+    filename = os.path.join(output_dir, f"ivf_{label}_sq8.faiss")
+    
+    print(f"\n--- Building {label} Index ---")
+    print(f"Target: {target_count} | nlists: {nlists} | Training on: {train_size}")
 
-    print("Computing nlists...")
-    nlists = int(math.sqrt(TOTAL_VECTORS))
-    print(f"Total vectors: {TOTAL_VECTORS}")
-    print(f"nlists (sqrt(N)): {nlists}")
-
-    # -----------------------------------
-    # 1️⃣ Train KMeans properly
-    # -----------------------------------
-
-    print("\nTraining k-means...")
-
-    # FAISS Clustering object
-    clustering = faiss.Clustering(DIM, nlists)
-
-    # Training size recommendation
-    train_size = min(40 * nlists, 5_000_000)
-    print(f"Training on {train_size} vectors")
-
-    train_vectors = generate_vectors(train_size, DIM)
-
-    # Use flat index as quantizer during training
-    quantizer = faiss.IndexFlatIP(DIM)
-
-    clustering.train(train_vectors, quantizer)
-
-    # -----------------------------------
-    # 2️⃣ Build IVF index using trained centroids
-    # -----------------------------------
-
-    print("\nBuilding IVF-SQ8 index...")
-
+    # 2. Initialize and Train
+    quantizer = faiss.IndexFlatIP(dim)
     index = faiss.IndexIVFScalarQuantizer(
-        quantizer,
-        DIM,
-        nlists,
-        faiss.ScalarQuantizer.QT_8bit,
-        faiss.METRIC_INNER_PRODUCT
+        quantizer, dim, nlists, faiss.ScalarQuantizer.QT_8bit, faiss.METRIC_INNER_PRODUCT
     )
-
-    index.train(train_vectors)
-
-    # -----------------------------------
-    # 3️⃣ Add all 500M vectors in streaming batches
-    # -----------------------------------
-
-    print("\nAdding 500M vectors...")
-
-    num_batches = math.ceil(TOTAL_VECTORS / NUM_VECTORS_PER_BATCH)
-
-    with tqdm(total=TOTAL_VECTORS, unit="vec") as pbar:
+    
+    print(f"Generating training data for {label}...")
+    train_vecs = np.random.uniform(low=-1.0, high=1.0, size=(train_size, dim)).astype('float32')
+    index.train(train_vecs)
+    
+    # 3. Fill the index
+    num_batches = math.ceil(target_count / NUM_VECTORS_PER_BATCH)
+    queue = multiprocessing.Queue(maxsize=num_workers)
+    processes = []
+    
+    with tqdm(total=target_count, desc=f"Adding to {label}", unit="vec") as pbar:
         for _ in range(num_batches):
-            vectors = generate_vectors(NUM_VECTORS_PER_BATCH, DIM)
-
-            if pbar.n + vectors.shape[0] > TOTAL_VECTORS:
-                vectors = vectors[:TOTAL_VECTORS - pbar.n]
-
+            if len(processes) < num_workers:
+                p = multiprocessing.Process(target=generate_vectors, args=(NUM_VECTORS_PER_BATCH, dim, queue))
+                p.start()
+                processes.append(p)
+            
+            vectors = queue.get()
+            # Handle if the last batch exceeds target
+            if pbar.n + vectors.shape[0] > target_count:
+                vectors = vectors[:target_count - pbar.n]
+                
             index.add(vectors)
             pbar.update(vectors.shape[0])
+            processes = [p for p in processes if p.is_alive()]
 
-    # -----------------------------------
-    # 4️⃣ Save
-    # -----------------------------------
+    # 4. Save
+    print(f"Saving to {filename}...")
+    faiss.write_index(index, filename)
+    
+    for p in processes:
+        p.join()
 
-    print("\nSaving index...")
-    faiss.write_index(index, OUTPUT_FILE)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dim", type=int, default=768)
+    parser.add_argument("--threads", type=int, default=multiprocessing.cpu_count())
+    parser.add_argument("--output-dir", type=str, default="/data/indices")
+    args = parser.parse_args()
 
-    print("Done.")
+    # Define all independent targets
+    targets = [i * 10_000_000 for i in range(1, 11)] # 10m, 20m... 100m
+    
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    for count in targets:
+        build_single_index(count, args.dim, args.threads, args.output_dir)
 
 if __name__ == "__main__":
     main()

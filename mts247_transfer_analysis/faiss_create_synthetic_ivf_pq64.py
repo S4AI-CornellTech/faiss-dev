@@ -80,7 +80,7 @@ def main():
     args = parser.parse_args()
 
     # Define all independent targets: 10m, 20m... 100m
-    targets = [i * 10_000_000 for i in range(1, 11)]
+    targets = [500_000_000]
     
     # Set FAISS internal threading
     faiss.omp_set_num_threads(args.threads)
