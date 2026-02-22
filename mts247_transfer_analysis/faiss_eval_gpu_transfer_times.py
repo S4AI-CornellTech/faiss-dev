@@ -30,11 +30,11 @@ TEMP_MEM_BYTES = 0
 REUSE_RESOURCES = True
 
 
-def clear_dev_shm():
-    shm_path = "/dev/shm"
-    if os.path.exists(shm_path):
-        for filename in os.listdir(shm_path):
-            file_path = os.path.join(shm_path, filename)
+def clear_cache():
+    cache_path = "/data/indices/hydra_cache_shards"
+    if os.path.exists(cache_path):
+        for filename in os.listdir(cache_path):
+            file_path = os.path.join(cache_path, filename)
             try:
                 if os.path.isfile(file_path) or os.path.islink(file_path):
                     os.unlink(file_path)
@@ -105,9 +105,9 @@ def main():
     os.environ.setdefault("FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES", str(1 << 30))
     os.environ.setdefault("FAISS_GPU_PACKED_LISTS_PROFILE", "1")
     os.environ.setdefault("FAISS_GPU_PACKED_LISTS_DEBUG", "0")
-    os.environ.setdefault("FAISS_GPU_PACKED_CACHE_PATH", "/dev/shm/test")
+    os.environ.setdefault("FAISS_GPU_PACKED_CACHE_PATH", "/data/indices/hydra_cache_shards/test")
 
-    clear_dev_shm()
+    clear_cache()
 
     # ----------------------------------------------------------
     # Load CPU index
@@ -123,8 +123,6 @@ def main():
     batch_latency_times = []
 
     res = get_gpu_resources() if REUSE_RESOURCES else None
-
-    os.system("cat /dev/shm/gpu_codes_all.bin > /dev/null")
 
     # ----------------------------------------------------------
     # Trials
