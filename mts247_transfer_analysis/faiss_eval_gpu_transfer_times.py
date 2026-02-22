@@ -16,6 +16,7 @@ INDEX_SIZE = "100m"
 INDEX_QUANTIZATION = "sq8"
 
 INDEX_PATH = f"/data/indices/{INDEX_QUANTIZATION}/ivf_{INDEX_SIZE}_{INDEX_QUANTIZATION}.faiss"
+# INDEX_PATH = f"/data/indices/shards/hydra_head_0.faiss"
 QUERY_PATH = "triviaqa_encodings.npy"
 TRIALS = 100
 K = 5

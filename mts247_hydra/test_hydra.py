@@ -3,6 +3,9 @@ import numpy as np
 import os
 import torch
 import pandas as pd
+import time
+import shutil
+import gc
 
 QUERY_PATH = "triviaqa_encodings.npy"
 HYDRA_SHARDS = [
@@ -18,12 +21,70 @@ HYDRA_SHARDS = [
 CENTROID_LIST = "/data/indices/shards/hydra_centroids.npy"
 CENTROID_LOOKUP = "/data/indices/shards/centroid_to_shard_map.csv"
 
-def main():
-    # --- 1. Load First 10 Queries ---
-    queries = np.load(QUERY_PATH, mmap_mode='r')
-    first_10_queries = queries[:10].astype('float32')
+PINNED_MEM_BYTES = 2 * 1024 * 1024 * 1024  # 2GB
+TEMP_MEM_BYTES   = 0
+NPROBE = 256
+USE_UNIFIED_MEMORY = False
 
-    # --- 2. Load Shards and Extract Quantizers ---
+
+def clear_dev_shm():
+    shm_path = "/dev/shm"
+    if os.path.exists(shm_path):
+        for filename in os.listdir(shm_path):
+            file_path = os.path.join(shm_path, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                print(f"Failed to delete {file_path}: {e}")
+
+
+def cuda_sync(res):
+    res.syncDefaultStreamCurrentDevice()
+
+
+def get_gpu_resources():
+    res = faiss.StandardGpuResources()
+    res.setTempMemory(TEMP_MEM_BYTES)
+    res.setPinnedMemory(PINNED_MEM_BYTES)
+    print(f"  Temp memory:   {TEMP_MEM_BYTES / (1024**3):.1f} GB")
+    print(f"  Pinned memory: {PINNED_MEM_BYTES / (1024**3):.1f} GB")
+    return res
+
+
+def load_shard_to_gpu(cpu_index, res):
+    co = faiss.GpuClonerOptions()
+    co.useUnifiedMemory = USE_UNIFIED_MEMORY
+    co.useFloat16 = True
+    co.usePrecomputed = False
+    co.indicesOptions = faiss.INDICES_32_BIT
+
+    t0 = time.perf_counter()
+    gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index, co)
+    cuda_sync(res)  # sync immediately after transfer like the working code
+    t1 = time.perf_counter()
+
+    gpu_index.nprobe = NPROBE
+    return gpu_index, t1 - t0
+
+
+def main():
+    os.environ.setdefault("FAISS_GPU_PACKED_LISTS", "1")
+    os.environ.setdefault("FAISS_GPU_PACKED_LISTS_MMAP", "1")
+    os.environ.setdefault("FAISS_GPU_DEVICEVECTOR_CACHE", "1")
+    os.environ.setdefault("FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES", str(1 << 30))
+    os.environ.setdefault("FAISS_GPU_PACKED_LISTS_PROFILE", "1")
+    os.environ.setdefault("FAISS_GPU_PACKED_LISTS_DEBUG", "0")
+    os.environ.setdefault("FAISS_GPU_PACKED_CACHE_PATH", "/dev/shm/test")
+    clear_dev_shm()
+
+    # --- 1. Load Queries ---
+    queries = np.load(QUERY_PATH, mmap_mode='r')
+    query_vectors = queries[:10].astype('float32')
+
+    # --- 2. Load Shards into CPU Memory ---
     shard_quantizers = []
 
     print("Loading indices into CPU memory...")
@@ -38,57 +99,73 @@ def main():
             "name": file_name,
             "quantizer": ivf_index.quantizer,
             "nlist": ivf_index.nlist,
-            "index": ivf_index  # keep the full index for later search
+            "index": ivf_index
         })
 
-        print(f"[{i+1}/{len(HYDRA_SHARDS)}] Loaded: {file_name} | Clusters (nlist): {ivf_index.nlist}")
+        print(f"[{i+1}/{len(HYDRA_SHARDS)}] Loaded: {file_name} | "
+              f"Type: {type(ivf_index).__name__} | "
+              f"Clusters: {ivf_index.nlist} | "
+              f"Vectors: {ivf_index.ntotal:,}")
 
-    print(f"{'='*50}\nAll indices loaded into memory.\n")
+    print(f"{'='*50}\nAll indices loaded into CPU memory.\n")
 
-    # --- 3. Load Queries and Centroids ---
-    queries = np.load(QUERY_PATH, mmap_mode='r')
-    query_vectors = queries[:10].astype('float32')
+    # --- 3. Initialise GPU Resources ---
+    print("Initialising GPU resources...")
+    res = get_gpu_resources()
 
+    # --- 4. Transfer shards to GPU one at a time ---
+    print("\nMoving shard indices to GPU...")
+    for i, shard in enumerate(shard_quantizers):
+        os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = f"/dev/shm/faiss_hydra_shard_{i}"
+        os.makedirs(f"/dev/shm/faiss_hydra_shard_{i}", exist_ok=True)
+
+        print(f"  [{i+1}/{len(shard_quantizers)}] Transferring {shard['name']}...")
+
+        gpu_index, transfer_time = load_shard_to_gpu(shard["index"], res)
+
+        print(f"    ✓ {shard['name']} | Transfer: {transfer_time:.4f}s | Vectors: {gpu_index.ntotal:,}")
+
+        del gpu_index
+        cuda_sync(res)
+        gc.collect()
+
+    print(f"{'='*50}\nAll shards transferred.\n")
+
+    # --- 5. Load and Normalise Centroids ---
     print("Loading global centroids...")
     centroids = np.load(CENTROID_LIST).astype('float32')
 
-    # L2 Normalize for Cosine Similarity
     faiss.normalize_L2(query_vectors)
     faiss.normalize_L2(centroids)
 
-    # --- 4. Move Centroids + Queries to GPU for Search ---
-    print("Moving centroids to GPU...")
-    res = faiss.StandardGpuResources()
+    # --- 6. Build Centroid Index on GPU ---
+    print("Moving centroid index to GPU...")
     d = centroids.shape[1]
-
-    # Build flat IP index on GPU directly
     centroid_index_cpu = faiss.IndexFlatIP(d)
     centroid_index_gpu = faiss.index_cpu_to_gpu(res, 0, centroid_index_cpu)
     centroid_index_gpu.add(centroids)
 
-    # --- 5. Identify Best 100 Centroids per Query (on GPU) ---
-    print("Computing Cosine Similarity for top 100 centroids on GPU...")
-    k_centroids = 256
+    # --- 7. Search Top-100 Centroids per Query ---
+    print("Computing cosine similarity for top 100 centroids on GPU...")
+    k_centroids = 100
     similarities, centroid_ids = centroid_index_gpu.search(query_vectors, k_centroids)
-    # centroid_ids shape: [num_queries, k_centroids]
 
-    # --- 6. Map Retrieved Centroid IDs → Shards and Count ---
+    # --- 8. Map Centroid IDs → Shards (GPU) ---
     print("Loading centroid-to-shard map onto GPU...")
     df = pd.read_csv(CENTROID_LOOKUP, dtype={"centroid_id": int, "shard_id": int})
 
-    # Build a lookup tensor: index = centroid_id, value = shard_id
     num_centroids = df["centroid_id"].max() + 1
     centroid_to_shard = torch.full((num_centroids,), -1, device="cuda", dtype=torch.long)
     centroid_to_shard[
         torch.tensor(df["centroid_id"].values, device="cuda", dtype=torch.long)
     ] = torch.tensor(df["shard_id"].values, device="cuda", dtype=torch.long)
 
-    # Retrieve shard for every centroid hit, per query
-    retrieved_ids_gpu = torch.tensor(centroid_ids, device="cuda", dtype=torch.long)  # [num_queries, k]
-    retrieved_shards  = centroid_to_shard[retrieved_ids_gpu]                          # [num_queries, k]
+    retrieved_ids_gpu = torch.tensor(centroid_ids, device="cuda", dtype=torch.long)
+    retrieved_shards  = centroid_to_shard[retrieved_ids_gpu]
 
     num_shards = int(torch.tensor(df["shard_id"].values).max().item()) + 1
 
+    # --- 9. Print Per-Query Shard Hit Counts ---
     print(f"\n{'='*50}")
     print(f"Shard hit counts per query (top-{k_centroids} centroids):")
 
@@ -110,5 +187,7 @@ def main():
 
     print(f"\n{'='*50}")
 
+
 if __name__ == "__main__":
+    os.environ["FAISS_VERBOSE"] = "1"
     main()
