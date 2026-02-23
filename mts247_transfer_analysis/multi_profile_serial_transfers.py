@@ -88,7 +88,6 @@ def main():
         print(f"Disk -> CPU Load Time: {disk_to_cpu_time:.6f} s")
         print(f"  Index type: {type(cpu_index).__name__}")
         print(f"  Total vectors: {cpu_index.ntotal:,}")
-        ntotal = cpu_index.ntotal
         if hasattr(cpu_index, 'nlist'):
             print(f"  IVF lists: {cpu_index.nlist:,}")
 
@@ -165,6 +164,9 @@ def main():
 
             print(f"CPU -> GPU Transfer Time: {cpu_to_gpu_time:.6f} s")
 
+            # Get ntotal for this specific shard
+            ntotal = cpu_indices[shard_idx].ntotal
+
             results.append({
                 'shard_idx': shard_idx,
                 'shard_name': os.path.basename(shard_path),
@@ -186,7 +188,7 @@ def main():
     # Save Results
     # ----------------------------------------------------------
     os.makedirs("data", exist_ok=True)
-    output_path = "data/HYDRA_SHARD_TRANSFER_TIMES.csv"
+    output_path = "data/parallel_shard_transfers.csv"
 
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=['shard_idx', 'shard_name', 'trial', 'disk_to_cpu_s', 'cpu_to_gpu_s', 'ntotal'])
