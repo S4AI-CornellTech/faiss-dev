@@ -3,16 +3,38 @@ import os
 import time
 import csv
 import gc
-import shutil
+import logging
+from datetime import datetime
 
 import faiss
 from tqdm import tqdm
 
-try:
-    import pycuda.driver as cuda
-    CUDA_AVAILABLE = True
-except ImportError:
-    CUDA_AVAILABLE = False
+# ==============================================================
+# Logging Setup
+# ==============================================================
+def setup_logging():
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"hydra_bench_{timestamp}.log")
+
+    # Create logger
+    logger = logging.getLogger("HydraBench")
+    logger.setLevel(logging.INFO)
+
+    # File Handler (Detailed)
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    
+    # Console Handler (Clean)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter('%(message)s'))
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    return logger, log_file
+
+log, LOG_PATH = setup_logging()
 
 # ==============================================================
 # Config
@@ -22,17 +44,23 @@ HYDRA_SHARDS = [
     "/data/indices/shards/hydra_head_1.faiss", 
     "/data/indices/shards/hydra_head_2.faiss", 
     "/data/indices/shards/hydra_head_3.faiss", 
-    "/data/indices/shards/hydra_head_4.faiss", 
-    "/data/indices/shards/hydra_head_5.faiss", 
-    "/data/indices/shards/hydra_head_6.faiss", 
-    "/data/indices/shards/hydra_head_7.faiss"
+    # "/data/indices/shards/hydra_head_4.faiss", 
+    # "/data/indices/shards/hydra_head_5.faiss", 
+    # "/data/indices/shards/hydra_head_6.faiss", 
+    # "/data/indices/shards/hydra_head_7.faiss", 
 ]
 
 TRIALS = 5
 USE_UNIFIED_MEMORY = False
 PINNED_MEM_BYTES = 2 * 1024 * 1024 * 1024
 TEMP_MEM_BYTES = 0
-REUSE_RESOURCES = True
+
+try:
+    import pycuda.driver as cuda
+    cuda.init() # Ensure CUDA is initialized
+    CUDA_AVAILABLE = True
+except Exception:
+    CUDA_AVAILABLE = False
 
 def get_gpu_resources():
     res = faiss.StandardGpuResources()
@@ -40,129 +68,103 @@ def get_gpu_resources():
     res.setPinnedMemory(PINNED_MEM_BYTES)
     return res
 
-
-def cuda_sync(res):
-    res.syncDefaultStreamCurrentDevice()
-
-
 def clear_gpu_memory():
-    """Clear GPU memory between transfers."""
     if CUDA_AVAILABLE:
         try:
-            cuda.Context.synchronize()
-            cuda.Device(0).synchronize()
+            # Synchronize before clearing
+            device = cuda.Device(0)
+            context = device.make_context()
+            context.synchronize()
+            context.pop()
         except Exception as e:
-            print(f"Warning: Could not fully clear GPU memory: {e}")
+            log.debug(f"GPU Clear Warning: {e}")
     gc.collect()
 
-
 def main():
-    # Enable optimized FAISS GPU paths
-    os.environ["FAISS_GPU_PACKED_LISTS"] = "1"
-    os.environ["FAISS_GPU_PACKED_LISTS_MMAP"] = "1"
-    os.environ["FAISS_GPU_DEVICEVECTOR_CACHE"] = "1"
-    os.environ["FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES"] = str(1 << 30)
-    os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"] = "0"
-    os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"] = "0"
+    # FAISS Optimization Envs
+    os.environ.update({
+        "FAISS_GPU_PACKED_LISTS": "1",
+        "FAISS_GPU_PACKED_LISTS_MMAP": "1",
+        "FAISS_GPU_DEVICEVECTOR_CACHE": "1",
+        "FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES": str(1 << 30),
+    })
 
-    # ----------------------------------------------------------
-    # Results storage
-    # ----------------------------------------------------------
     results = []
+    shard_metadata = {} # To store ntotal and disk times per shard
 
-    # ----------------------------------------------------------
-    # Profile each trial (outer) and shard (inner)
-    # ----------------------------------------------------------
-    for trial in tqdm(range(1, TRIALS + 1), desc="Trials"):
-        print(f"\n{'='*60}")
-        print(f"Starting Trial {trial}")
-        print(f"{'='*60}")
+    log.info(f"{'='*60}\nSTEP 1: Loading Shards to RAM\n{'='*60}")
+    
+    loaded_indices = []
+    for idx, path in enumerate(HYDRA_SHARDS):
+        t0 = time.perf_counter()
+        cpu_index = faiss.read_index(path)
+        dt = time.perf_counter() - t0
+        
+        loaded_indices.append(cpu_index)
+        shard_metadata[idx] = {
+            'disk_to_cpu_s': dt,
+            'ntotal': cpu_index.ntotal,
+            'name': os.path.basename(path)
+        }
+        log.info(f"Loaded Shard {idx} | Time: {dt:.4f}s | Vectors: {cpu_index.ntotal:,}")
 
-        for shard_idx, shard_path in enumerate(HYDRA_SHARDS):
-            print(f"\nProfiling Shard {shard_idx}: {shard_path}")
+    log.info(f"\n{'='*60}\nSTEP 2: Starting GPU Transfer Trials ({TRIALS})\n{'='*60}")
 
-            # Create fresh GPU resources for this shard
+    for trial in range(1, TRIALS + 1):
+        # Progress bar for internal shard tracking
+        pbar = tqdm(enumerate(loaded_indices), total=len(loaded_indices), desc=f"Trial {trial}/{TRIALS}")
+        
+        for idx, cpu_index in pbar:
             res = get_gpu_resources()
-
-            # Measure disk to CPU transfer
-            t0 = time.perf_counter()
-            cpu_index = faiss.read_index(shard_path)
-            t1 = time.perf_counter()
-            disk_to_cpu_time = t1 - t0
-
-            print(f"Disk -> CPU Load Time: {disk_to_cpu_time:.6f} s")
-            print(f"  Index type: {type(cpu_index).__name__}")
-            print(f"  Total vectors: {cpu_index.ntotal:,}")
-            ntotal = cpu_index.ntotal
-            if hasattr(cpu_index, 'nlist'):
-                print(f"  IVF lists: {cpu_index.nlist:,}")
-
-            os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
-                f"/data/indices/hydra_cache_shards/hydra_shard_{shard_idx}"
-            )
-
+            
             co = faiss.GpuClonerOptions()
             co.useUnifiedMemory = USE_UNIFIED_MEMORY
             co.useFloat16 = True
-            co.usePrecomputed = False
             co.indicesOptions = faiss.INDICES_32_BIT
 
+            # Transfer & Sync
             t_start = time.perf_counter()
             gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index, co)
-            cuda_sync(res)
+            res.syncDefaultStreamCurrentDevice()
             t_end = time.perf_counter()
 
-            cpu_to_gpu_time = t_end - t_start
-
-            print(f"CPU -> GPU Transfer Time: {cpu_to_gpu_time:.6f} s")
-
+            elapsed = t_end - t_start
+            
             results.append({
-                'shard_idx': shard_idx,
-                'shard_name': os.path.basename(shard_path),
+                'shard_idx': idx,
+                'shard_name': shard_metadata[idx]['name'],
                 'trial': trial,
-                'disk_to_cpu_s': disk_to_cpu_time,
-                'cpu_to_gpu_s': cpu_to_gpu_time,
-                'ntotal': ntotal
+                'disk_to_cpu_s': shard_metadata[idx]['disk_to_cpu_s'],
+                'cpu_to_gpu_s': elapsed,
+                'ntotal': shard_metadata[idx]['ntotal']
             })
 
-            # Cleanup CPU index and GPU resources after this shard
+            # Explicit Cleanup
             del gpu_index
-            del cpu_index
             del res
             clear_gpu_memory()
 
     # ----------------------------------------------------------
-    # Save Results
+    # Save & Summarize
     # ----------------------------------------------------------
     os.makedirs("data", exist_ok=True)
-    output_path = "data/HYDRA_SHARD_TRANSFER_TIMES.csv"
-
-    with open(output_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=['shard_idx', 'shard_name', 'trial', 'disk_to_cpu_s', 'cpu_to_gpu_s', 'ntotal'])
+    out_path = "data/HYDRA_SHARD_TRANSFER_TIMES.csv"
+    
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=results[0].keys())
         writer.writeheader()
         writer.writerows(results)
 
-    # ----------------------------------------------------------
-    # Summary Statistics
-    # ----------------------------------------------------------
-    print(f"\n{'='*60}")
-    print(f"TRANSFER SUMMARY")
-    print(f"{'='*60}")
+    log.info(f"\n{'='*60}\nFINAL SUMMARY\n{'='*60}")
+    for idx in shard_metadata:
+        shard_runs = [r['cpu_to_gpu_s'] for r in results if r['shard_idx'] == idx]
+        avg_gpu = sum(shard_runs) / len(shard_runs)
+        log.info(f"Shard {idx} ({shard_metadata[idx]['name']}):")
+        log.info(f"  Disk -> RAM: {shard_metadata[idx]['disk_to_cpu_s']:.4f}s")
+        log.info(f"  RAM -> GPU (Avg of {TRIALS}): {avg_gpu:.4f}s")
 
-    for shard_idx in range(len(HYDRA_SHARDS)):
-        shard_results = [r for r in results if r['shard_idx'] == shard_idx]
-        disk_to_cpu = shard_results[0]['disk_to_cpu_s']
-        gpu_times = [r['cpu_to_gpu_s'] for r in shard_results]
-        avg_gpu = sum(gpu_times) / len(gpu_times)
-        
-        print(f"\nShard {shard_idx}:")
-        print(f"  Disk->CPU: {disk_to_cpu:.6f} s")
-        print(f"  CPU->GPU (avg): {avg_gpu:.6f} s")
-        print(f"  Vectors: {shard_results[0]['ntotal']:,}")
-
-    print(f"\nFull results saved to {output_path}\n")
-
+    log.info(f"\nCSV results: {out_path}")
+    log.info(f"Full log: {LOG_PATH}")
 
 if __name__ == "__main__":
-    os.environ["FAISS_VERBOSE"] = "0"
     main()
