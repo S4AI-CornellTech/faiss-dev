@@ -460,6 +460,22 @@ IVFBase::IVFBase(
 
 IVFBase::~IVFBase() {}
 
+void IVFBase::preallocatePackedBuffers(size_t maxGpuBytes, size_t maxIndexBytes) {
+    auto stream = resources_->getDefaultStreamCurrentDevice();
+    
+    if (maxGpuBytes > 0) {
+        packedListData_.resizeNoInitExact(maxGpuBytes, stream);
+        std::cerr << "[faiss] Preallocated " << (maxGpuBytes >> 30) 
+                  << " GB for packed codes\n";
+    }
+    
+    if (maxIndexBytes > 0) {
+        packedListIndices_.resizeNoInitExact(maxIndexBytes, stream);
+        std::cerr << "[faiss] Preallocated " << (maxIndexBytes >> 20) 
+                  << " MB for packed indices\n";
+    }
+}
+
 void IVFBase::reserveMemory(idx_t numVecs) {
     auto stream = resources_->getDefaultStreamCurrentDevice();
 
@@ -488,7 +504,7 @@ void IVFBase::reserveMemory(idx_t numVecs) {
     updateDeviceListInfo_(stream);
 }
 
-void IVFBase::reset() {
+void IVFBase::reset(bool clearPackedBuffers) {
     auto stream = resources_->getDefaultStreamCurrentDevice();
 
     deviceListData_.clear();
@@ -498,8 +514,10 @@ void IVFBase::reset() {
     deviceListLengths_.clear();
     listOffsetToUserIndex_.clear();
     packedLists_ = false;
-    packedListData_.clear();
-    packedListIndices_.clear();
+    if (clearPackedBuffers) {
+        packedListData_.clear();
+        packedListIndices_.clear();
+    }
     packedListCodeOffsets_.clear();
     packedListIndexOffsets_.clear();
 
@@ -892,7 +910,8 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
 
         if (codesCacheOk && usePacked && metaLoaded) {
             // Reset state to avoid stale pointers/state across repeated loads.
-            reset();
+            // But preserve packed buffers for reuse to avoid expensive reallocation.
+            reset(false);
 
             auto pinnedAlloc  = resources_->getPinnedMemory();
             auto* pinnedBuf   = static_cast<uint8_t*>(pinnedAlloc.first);
@@ -901,19 +920,31 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
             auto copyStream   = resources_->getAsyncCopyStreamCurrentDevice();
             auto defaultStream = resources_->getDefaultStreamCurrentDevice();
 
-            // Clear previous allocations to prevent GPU memory corruption when
-            // reusing DeviceVector across trials with pinned mmap caching
-            packedListData_.clear();
-            packedListIndices_.clear();
+            // Intelligently reuse GPU buffers to avoid expensive reallocation.
+            // Only clear if the existing allocation is significantly larger (>50% overhead)
+            // to avoid GPU memory thrashing while still providing reuse benefits.
+            if (packedListData_.size() > totalGpuBytes * 1.5) {
+                // Buffer is too large; free it to reclaim memory
+                packedListData_.clear();
+            }
+            // Otherwise keep existing allocation and resize in-place if needed
+
+            if (packedListIndices_.size() > totalIndexBytes * 1.5) {
+                // Buffer is too large; free it to reclaim memory
+                packedListIndices_.clear();
+            }
+            // Otherwise keep existing allocation and resize in-place if needed
 
             // ------------------------------------------------------------------
             // Allocate GPU buffers for codes and indices.
-            // We start both allocations before uploading so they can potentially
-            // be served from the same CUDA memory pool call.
+            // Skip resize if buffer is already large enough to avoid allocation
+            // overhead on subsequent loads of similar-sized indices.
             // ------------------------------------------------------------------
             {
                 auto t0a = now();
-                packedListData_.resizeNoInitExact(totalGpuBytes, copyStream);
+                if (packedListData_.size() < totalGpuBytes) {
+                    packedListData_.resizeNoInitExact(totalGpuBytes, copyStream);
+                }
                 t_alloc_codes = elapsedSec(t0a, now());
             }
 
@@ -943,7 +974,9 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
 
                 if (indicesCacheOk && totalIndexBytes > 0) {
                     auto t0ia = now();
-                    packedListIndices_.resizeNoInitExact(totalIndexBytes, copyStream);
+                    if (packedListIndices_.size() < totalIndexBytes) {
+                        packedListIndices_.resizeNoInitExact(totalIndexBytes, copyStream);
+                    }
                     t_alloc_indices = elapsedSec(t0ia, now());
                 }
 
@@ -1071,8 +1104,10 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                                 indicesPath, std::ios::binary | std::ios::trunc);
 
                         auto t0ia = now();
-                        packedListIndices_.resizeNoInitExact(
-                                totalIndexBytes, indexStream);
+                        if (packedListIndices_.size() < totalIndexBytes) {
+                            packedListIndices_.resizeNoInitExact(
+                                    totalIndexBytes, indexStream);
+                        }
                         t_alloc_indices += elapsedSec(t0ia, now());
 
                         for (idx_t i = 0; i < nlist; ++i) {

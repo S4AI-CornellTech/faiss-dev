@@ -45,7 +45,12 @@ class IVFBase {
 
     /// Clear out all inverted lists, but retain the coarse quantizer
     /// and the product quantizer info
-    virtual void reset();
+    /// If clearPackedBuffers=false, preserves GPU packed buffers for reuse
+    virtual void reset(bool clearPackedBuffers = true);
+
+    /// Pre-allocate GPU buffers to avoid expensive allocation on first load.
+    /// Call this once before loading multiple indices of similar size.
+    void preallocatePackedBuffers(size_t maxGpuBytes, size_t maxIndexBytes = 0);
 
     /// Return the number of dimensions we are indexing
     idx_t getDim() const;
