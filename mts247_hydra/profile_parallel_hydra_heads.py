@@ -18,7 +18,7 @@ except ImportError:
 # Config
 # ==============================================================
 HYDRA_SHARDS = [
-    "/data/indices/shards/hydra_head_0.faiss", 
+    "/data/indices/shards/hydra_head_7.faiss", 
     "/data/indices/shards/hydra_head_1.faiss", 
     "/data/indices/shards/hydra_head_2.faiss", 
     "/data/indices/shards/hydra_head_3.faiss", 
@@ -64,6 +64,8 @@ def main():
     os.environ["FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES"] = str(1 << 30)
     os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"] = "1"
     os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"] = "0"
+    os.environ["FAISS_GPU_PREALLOCATE_MB"] = "61440"
+
 
     # ----------------------------------------------------------
     # Results storage
@@ -93,6 +95,10 @@ def main():
     # Measure CPU to GPU transfer (multiple trials, keep CPU index)
     gpu_to_cpu_times = []
     
+    # Create reusable GPU resources that will persist across all trials
+    # This allows GPU buffers to be pre-allocated on first load and reused
+    persistent_res = get_gpu_resources()
+    
     # ----------------------------------------------------------
     # Profile each trial (outer) and shard (inner)
     # ----------------------------------------------------------
@@ -102,7 +108,8 @@ def main():
         print(f"{'='*60}")
 
         for shard_idx, shard_path in enumerate(HYDRA_SHARDS):
-            res = get_gpu_resources()
+            # Reuse the same GPU resources across all trials
+            # This preserves pre-allocated GPU buffers
             print(f"\nProfiling Shard {shard_idx}: {shard_path}")
 
             os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
@@ -116,8 +123,8 @@ def main():
             co.indicesOptions = faiss.INDICES_32_BIT
 
             t_start = time.perf_counter()
-            gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_indices[shard_idx], co)
-            cuda_sync(res)
+            gpu_index = faiss.index_cpu_to_gpu(persistent_res, 0, cpu_indices[shard_idx], co)
+            persistent_res.syncDefaultStreamCurrentDevice()
             t_end = time.perf_counter()
 
             cpu_to_gpu_time = t_end - t_start
@@ -133,10 +140,13 @@ def main():
                 'ntotal': ntotal
             })
 
-            # Cleanup CPU index and GPU resources after this shard
+            # Cleanup GPU index but keep GPU resources for next shard
             del gpu_index
-            del res
             clear_gpu_memory()
+
+    # Cleanup persistent GPU resources after all trials
+    del persistent_res
+    clear_gpu_memory()
 
     # ----------------------------------------------------------
     # Save Results
