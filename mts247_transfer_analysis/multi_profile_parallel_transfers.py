@@ -22,7 +22,7 @@ HYDRA_SHARDS = [
     "/data/indices/shards/hydra_head_1.faiss", 
     "/data/indices/shards/hydra_head_2.faiss", 
     "/data/indices/shards/hydra_head_3.faiss", 
-    # "/data/indices/shards/hydra_head_4.faiss", 
+    "/data/indices/shards/hydra_head_4.faiss", 
     # "/data/indices/shards/hydra_head_5.faiss", 
     # "/data/indices/shards/hydra_head_6.faiss", 
     # "/data/indices/shards/hydra_head_7.faiss"
@@ -40,6 +40,18 @@ def get_gpu_resources():
     res.setPinnedMemory(PINNED_MEM_BYTES)
     return res
 
+def clear_cache():
+    cache_path = "/data/indices/hydra_cache_shards"
+    if os.path.exists(cache_path):
+        for filename in os.listdir(cache_path):
+            file_path = os.path.join(cache_path, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+            except Exception as e:
+                print(f"Failed to delete {file_path}: {e}")
 
 def cuda_sync(res):
     res.syncDefaultStreamCurrentDevice()
@@ -66,6 +78,7 @@ def main():
     os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"] = "0"
     os.environ["FAISS_GPU_PREALLOCATE_MB"] = "61440"
 
+    clear_cache()
 
     # ----------------------------------------------------------
     # Results storage
@@ -116,6 +129,10 @@ def main():
     # Load largest shard to pre-allocate max buffer, then delete it
     # This primes the GPU memory and prevents fragmentation during trials
     print(f"Loading largest shard (Index {max_shard_idx}) to pre-allocate buffer...")
+
+    # Set cache path for warmup phase
+    os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = f"/data/indices/hydra_cache_shards/hydra_shard_{max_shard_idx}"
+
     co = faiss.GpuClonerOptions()
     co.useUnifiedMemory = USE_UNIFIED_MEMORY
     co.useFloat16 = True
@@ -145,9 +162,7 @@ def main():
             # This prevents fragmentation during subsequent loads
             print(f"\nProfiling Shard {shard_idx}: {shard_path}")
 
-            os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
-                f"/data/indices/hydra_cache_shards/hydra_shard_{shard_idx}"
-            )
+            os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = f"/data/indices/hydra_cache_shards/hydra_shard_{shard_idx}"
 
             co = faiss.GpuClonerOptions()
             co.useUnifiedMemory = USE_UNIFIED_MEMORY
