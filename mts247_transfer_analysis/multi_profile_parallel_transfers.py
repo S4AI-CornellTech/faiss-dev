@@ -18,14 +18,14 @@ except ImportError:
 # Config
 # ==============================================================
 HYDRA_SHARDS = [
-    "/data/indices/shards/hydra_head_0.faiss", 
-    "/data/indices/shards/hydra_head_1.faiss", 
-    "/data/indices/shards/hydra_head_2.faiss", 
-    "/data/indices/shards/hydra_head_3.faiss", 
-    "/data/indices/shards/hydra_head_4.faiss", 
-    # "/data/indices/shards/hydra_head_5.faiss", 
-    # "/data/indices/shards/hydra_head_6.faiss", 
-    # "/data/indices/shards/hydra_head_7.faiss"
+    "/data/indices/hydra_shards/hydra_head_0.faiss", 
+    "/data/indices/hydra_shards/hydra_head_1.faiss", 
+    "/data/indices/hydra_shards/hydra_head_2.faiss", 
+    "/data/indices/hydra_shards/hydra_head_3.faiss", 
+    "/data/indices/hydra_shards/hydra_head_4.faiss", 
+    "/data/indices/hydra_shards/hydra_head_5.faiss", 
+    # "/data/indices/hydra_shards/hydra_head_6.faiss", 
+    # "/data/indices/hydra_shards/hydra_head_7.faiss"
 ]
 
 TRIALS = 100
