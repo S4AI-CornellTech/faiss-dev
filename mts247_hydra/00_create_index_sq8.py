@@ -74,7 +74,7 @@ def main():
     args = parser.parse_args()
 
     # Define all independent targets
-    targets = [500_000_000] # 10m, 20m... 100m
+    targets = [300_000_000] # 10m, 20m... 100m
     
     os.makedirs(args.output_dir, exist_ok=True)
     

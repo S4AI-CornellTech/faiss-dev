@@ -20,15 +20,16 @@ except ImportError:
 # Config
 # ==============================================================
 HYDRA_SHARDS = [
-    "/data/indices/shards/hydra_head_0.faiss", 
-    "/data/indices/shards/hydra_head_1.faiss", 
-    "/data/indices/shards/hydra_head_2.faiss", 
-    "/data/indices/shards/hydra_head_3.faiss", 
-    "/data/indices/shards/hydra_heda_4.faiss"
+    "/data/indices/hydra_shards/hydra_head_0.faiss", 
+    "/data/indices/hydra_shards/hydra_head_1.faiss", 
+    "/data/indices/hydra_shards/hydra_head_2.faiss", 
+    "/data/indices/hydra_shards/hydra_head_3.faiss", 
+    "/data/indices/hydra_shards/hydra_head_4.faiss",
+    "/data/indices/hydra_shards/hydra_head_5.faiss"
 ]
 QUERY_PATH = "triviaqa_encodings.npy"
-CENTROID_LIST = "/data/indices/shards/hydra_centroids.npy"
-CENTROID_LOOKUP = "/data/indices/shards/centroid_to_shard_map.csv"
+CENTROID_LIST = "/data/indices/hydra_centroids.npy"
+CENTROID_LOOKUP = "/data/indices/centroid_to_shard_map.csv"
 
 TRIALS = 100
 USE_UNIFIED_MEMORY = False

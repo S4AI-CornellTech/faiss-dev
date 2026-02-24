@@ -15,8 +15,6 @@ HYDRA_SHARDS = [
     "/data/indices/shards/hydra_head_3.faiss", 
     "/data/indices/shards/hydra_head_4.faiss", 
     "/data/indices/shards/hydra_head_5.faiss", 
-    "/data/indices/shards/hydra_head_6.faiss", 
-    "/data/indices/shards/hydra_head_7.faiss"
 ]
 
 OUTPUT_DIR = "/data/indices/hydra_cache_shards"

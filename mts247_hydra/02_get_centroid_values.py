@@ -6,7 +6,7 @@ import os
 # ==============================================================
 # CONFIG
 # ==============================================================
-INDEX_PATH = "/data/indices/hydra_ivf_500m_sq8.faiss"
+INDEX_PATH = "/data/indices/hydra_ivf_300m_sq8.faiss"
 OUTPUT_PATH = "/data/indices/hydra_centroids.npy"
 # ==============================================================
 
