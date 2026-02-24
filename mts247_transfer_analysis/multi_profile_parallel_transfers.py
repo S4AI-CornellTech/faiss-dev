@@ -24,8 +24,6 @@ HYDRA_SHARDS = [
     "/data/indices/hydra_shards/hydra_head_3.faiss", 
     "/data/indices/hydra_shards/hydra_head_4.faiss", 
     "/data/indices/hydra_shards/hydra_head_5.faiss", 
-    # "/data/indices/hydra_shards/hydra_head_6.faiss", 
-    # "/data/indices/hydra_shards/hydra_head_7.faiss"
 ]
 
 TRIALS = 100
@@ -76,7 +74,6 @@ def main():
     os.environ["FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES"] = str(1 << 30)
     os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"] = "1"
     os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"] = "0"
-    os.environ["FAISS_GPU_PREALLOCATE_MB"] = "61440"
 
     clear_cache()
 
@@ -125,29 +122,6 @@ def main():
         if shard_size > max_shard_size:
             max_shard_size = shard_size
             max_shard_idx = shard_idx
-    
-    # Load largest shard to pre-allocate max buffer, then delete it
-    # This primes the GPU memory and prevents fragmentation during trials
-    print(f"Loading largest shard (Index {max_shard_idx}) to pre-allocate buffer...")
-
-    # Set cache path for warmup phase
-    os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = f"/data/indices/hydra_cache_shards/hydra_shard_{max_shard_idx}"
-
-    co = faiss.GpuClonerOptions()
-    co.useUnifiedMemory = USE_UNIFIED_MEMORY
-    co.useFloat16 = True
-    co.usePrecomputed = False
-    co.indicesOptions = faiss.INDICES_32_BIT
-    
-    buffer_warmup = faiss.index_cpu_to_gpu(persistent_res, 0, cpu_indices[max_shard_idx], co)
-    persistent_res.syncDefaultStreamCurrentDevice()
-    print(f"GPU buffer warmed up with Shard {max_shard_idx} (~{max_shard_size * 4 / 1e9:.1f}GB estimate)")
-    
-    # Delete the warmup buffer to free GPU memory before trials
-    # The persistent_res remains, with pre-configured GPU memory management
-    del buffer_warmup
-    clear_gpu_memory()
-    print(f"Warmup buffer deleted; persistent GPU resources ready for trials")
     
     # ----------------------------------------------------------
     # Profile each trial (outer) and shard (inner)
@@ -229,7 +203,6 @@ def main():
         print(f"  Vectors: {shard_results[0]['ntotal']:,}")
 
     print(f"\nFull results saved to {output_path}\n")
-
 
 if __name__ == "__main__":
     os.environ["FAISS_VERBOSE"] = "0"

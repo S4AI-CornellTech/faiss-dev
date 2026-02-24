@@ -460,22 +460,6 @@ IVFBase::IVFBase(
 
 IVFBase::~IVFBase() {}
 
-void IVFBase::preallocatePackedBuffers(size_t maxGpuBytes, size_t maxIndexBytes) {
-    auto stream = resources_->getDefaultStreamCurrentDevice();
-    
-    if (maxGpuBytes > 0) {
-        packedListData_.resizeNoInitExact(maxGpuBytes, stream);
-        std::cerr << "[faiss] Preallocated " << (maxGpuBytes >> 30) 
-                  << " GB for packed codes\n";
-    }
-    
-    if (maxIndexBytes > 0) {
-        packedListIndices_.resizeNoInitExact(maxIndexBytes, stream);
-        std::cerr << "[faiss] Preallocated " << (maxIndexBytes >> 20) 
-                  << " MB for packed indices\n";
-    }
-}
-
 void IVFBase::reserveMemory(idx_t numVecs) {
     auto stream = resources_->getDefaultStreamCurrentDevice();
 

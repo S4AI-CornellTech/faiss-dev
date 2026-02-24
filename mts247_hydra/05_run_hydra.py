@@ -100,37 +100,6 @@ def load_cpu_indices():
     
     return cpu_indices
 
-def preallocate_gpu_buffer(persistent_res, cpu_indices):
-    """Pre-allocate GPU buffer with largest shard to prevent fragmentation."""
-    print("\n" + "="*60)
-    print("Pre-allocating GPU Buffer")
-    print("="*60)
-    
-    # Find largest shard
-    max_shard_idx = 0
-    max_shard_size = 0
-    for shard_idx, cpu_index in enumerate(cpu_indices):
-        if cpu_index.ntotal > max_shard_size:
-            max_shard_size = cpu_index.ntotal
-            max_shard_idx = shard_idx
-    
-    print(f"Loading largest shard (Index {max_shard_idx}) for pre-allocation...")
-    os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
-        f"/data/indices/hydra_cache_shards/hydra_shard_{max_shard_idx}"
-    )
-    
-    int_time = time.perf_counter()
-    buffer_warmup = faiss.index_cpu_to_gpu(persistent_res, 0, cpu_indices[max_shard_idx], get_gpu_cloner_options())
-    persistent_res.syncDefaultStreamCurrentDevice()
-    warmup_time = time.perf_counter() - int_time
-    
-    print(f"Buffer pre-allocated in {warmup_time:.6f}s (~{max_shard_size * 4 / 1e9:.1f}GB)")
-    
-    del buffer_warmup
-    clear_gpu_memory()
-    
-    return max_shard_idx
-
 def warmup_shards(persistent_res, cpu_indices, num_warmup_runs):
     """Warmup GPU with repeated shard loads and searches."""
     print("\n" + "="*60)
@@ -208,7 +177,6 @@ def main():
     os.environ["FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES"] = str(1 << 30)
     os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"] = "1"
     os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"] = "0"
-    os.environ["FAISS_GPU_PREALLOCATE_MB"] = "61440"
 
     # ==============================================================
     # Phase 1: Initialize & Load Indices
@@ -216,7 +184,6 @@ def main():
     cpu_indices = load_cpu_indices()
     persistent_res = get_gpu_resources()
     
-    preallocate_gpu_buffer(persistent_res, cpu_indices)
     warmup_times = warmup_shards(persistent_res, cpu_indices, WARMUP_RUNS)
     
     # ==============================================================
