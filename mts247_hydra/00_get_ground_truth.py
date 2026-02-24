@@ -10,10 +10,10 @@ import multiprocessing
 # === Config ===
 index_quantization = "sq8"
 QUERY_FILE = "triviaqa_encodings.npy"
-OUTPUT_FILE = f"data/hydra_baseline.csv"
+OUTPUT_FILE = f"data/hydra_monolithic_ground_truth.csv"
 
 # Lists of parameters to iterate through
-NPROBE_LIST          = [256]         # list of nprobe values
+NPROBE_LIST          = [17320]         # list of nprobe values
 BATCH_SIZE_LIST      = [1]          # list of batch sizes
 RETRIEVED_DOCS_LIST  = [5]             # list of top-k values
 INDEX_SIZE_LIST      = ["300m"]
