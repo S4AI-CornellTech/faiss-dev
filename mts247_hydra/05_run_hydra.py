@@ -71,7 +71,136 @@ def clear_gpu_memory():
             print(f"Warning: Could not fully clear GPU memory: {e}")
     gc.collect()
 
+def get_gpu_cloner_options():
+    """Get GPU cloner options with configured parameters."""
+    co = faiss.GpuClonerOptions()
+    co.useUnifiedMemory = USE_UNIFIED_MEMORY
+    co.useFloat16 = True
+    co.usePrecomputed = False
+    co.indicesOptions = faiss.INDICES_32_BIT
+    return co
+
+def load_cpu_indices():
+    """Load all shard indices from disk to CPU."""
+    print("\n" + "="*60)
+    print("Loading Shard Indices from Disk")
+    print("="*60)
+    
+    cpu_indices = []
+    for shard_idx, shard_path in enumerate(HYDRA_SHARDS):
+        print(f"\nShard {shard_idx}: {shard_path}")
+        t0 = time.perf_counter()
+        cpu_index = faiss.read_index(shard_path)
+        t1 = time.perf_counter()
+        
+        cpu_indices.append(cpu_index)
+        print(f"  Disk → CPU: {t1-t0:.6f}s | Vectors: {cpu_index.ntotal:,}")
+        if hasattr(cpu_index, 'nlist'):
+            print(f"  IVF Lists: {cpu_index.nlist:,}")
+    
+    return cpu_indices
+
+def preallocate_gpu_buffer(persistent_res, cpu_indices):
+    """Pre-allocate GPU buffer with largest shard to prevent fragmentation."""
+    print("\n" + "="*60)
+    print("Pre-allocating GPU Buffer")
+    print("="*60)
+    
+    # Find largest shard
+    max_shard_idx = 0
+    max_shard_size = 0
+    for shard_idx, cpu_index in enumerate(cpu_indices):
+        if cpu_index.ntotal > max_shard_size:
+            max_shard_size = cpu_index.ntotal
+            max_shard_idx = shard_idx
+    
+    print(f"Loading largest shard (Index {max_shard_idx}) for pre-allocation...")
+    os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
+        f"/data/indices/hydra_cache_shards/hydra_shard_{max_shard_idx}"
+    )
+    
+    int_time = time.perf_counter()
+    buffer_warmup = faiss.index_cpu_to_gpu(persistent_res, 0, cpu_indices[max_shard_idx], get_gpu_cloner_options())
+    persistent_res.syncDefaultStreamCurrentDevice()
+    warmup_time = time.perf_counter() - int_time
+    
+    print(f"Buffer pre-allocated in {warmup_time:.6f}s (~{max_shard_size * 4 / 1e9:.1f}GB)")
+    
+    del buffer_warmup
+    clear_gpu_memory()
+    
+    return max_shard_idx
+
+def warmup_shards(persistent_res, cpu_indices, num_warmup_runs):
+    """Warmup GPU with repeated shard loads and searches."""
+    print("\n" + "="*60)
+    print(f"Warmup Phase ({num_warmup_runs} runs)")
+    print("="*60)
+    
+    warmup_times = {i: [] for i in range(len(HYDRA_SHARDS))}
+    
+    for run in range(num_warmup_runs):
+        print(f"\nWarmup Run {run + 1}/{num_warmup_runs}")
+        for shard_idx in range(len(HYDRA_SHARDS)):
+            os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
+                f"/data/indices/hydra_cache_shards/hydra_shard_{shard_idx}"
+            )
+            
+            t_start = time.perf_counter()
+            gpu_index = faiss.index_cpu_to_gpu(persistent_res, 0, cpu_indices[shard_idx], get_gpu_cloner_options())
+            persistent_res.syncDefaultStreamCurrentDevice()
+            transfer_time = time.perf_counter() - t_start
+            
+            warmup_times[shard_idx].append(transfer_time)
+            print(f"  Shard {shard_idx}: {transfer_time:.6f}s")
+            
+            del gpu_index
+            persistent_res.syncDefaultStreamCurrentDevice()
+            clear_gpu_memory()
+    
+    return warmup_times
+
+def get_centroid_to_shard_mapping():
+    """Load and build centroid to shard mapping on GPU."""
+    print("Loading centroid-to-shard mapping...")
+    df = pd.read_csv(CENTROID_LOOKUP, dtype={"centroid_id": int, "shard_id": int})
+    
+    num_centroids = df["centroid_id"].max() + 1
+    centroid_to_shard = torch.full((num_centroids,), -1, device="cuda", dtype=torch.long)
+    centroid_to_shard[
+        torch.tensor(df["centroid_id"].values, device="cuda", dtype=torch.long)
+    ] = torch.tensor(df["shard_id"].values, device="cuda", dtype=torch.long)
+    
+    num_shards = int(torch.tensor(df["shard_id"].values).max().item()) + 1
+    return centroid_to_shard, num_shards
+
+def analyze_shard_hits_per_query(query_idx, k_centroids, centroid_ids, retrieved_shards, num_shards):
+    """Compute shard hit counts for a single query."""
+    shard_counts = torch.zeros(num_shards, device="cuda", dtype=torch.long)
+    shard_counts.scatter_add_(
+        0,
+        retrieved_shards[query_idx],
+        torch.ones(k_centroids, device="cuda", dtype=torch.long)
+    )
+    shard_counts_cpu = shard_counts.cpu().numpy()
+    
+    max_shard_id = int(np.argmax(shard_counts_cpu))
+    max_hits = shard_counts_cpu[max_shard_id]
+    
+    return max_shard_id, shard_counts_cpu
+
+def print_shard_analysis(query_idx, k_centroids, centroid_ids, max_shard_id, max_hits, shard_counts_cpu):
+    """Print shard analysis results for a query."""
+    print(f"\n  Query {query_idx} | Top 5 Centroid IDs: {centroid_ids[query_idx][:5]}")
+    print(f"  {'Shard ID':<12} {'Centroid Hits':<16} {'Shard File'}")
+    print(f"  {'-'*45}")
+    for shard_id, count in enumerate(shard_counts_cpu):
+        shard_name = os.path.basename(HYDRA_SHARDS[shard_id])
+        print(f"  {shard_id:<12} {count:<16} {shard_name}")
+    print(f"  → Selected Shard: {max_shard_id} with {max_hits} hits")
+
 def main():
+    """Main HYDRA analysis pipeline."""
     # Enable optimized FAISS GPU paths
     os.environ["FAISS_GPU_PACKED_LISTS"] = "1"
     os.environ["FAISS_GPU_PACKED_LISTS_MMAP"] = "1"
@@ -81,218 +210,108 @@ def main():
     os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"] = "0"
     os.environ["FAISS_GPU_PREALLOCATE_MB"] = "61440"
 
-    # clear_cache()
-
-    # ----------------------------------------------------------
-    # Results storage
-    # ----------------------------------------------------------
-    results = []
-    cpu_indices = []
-
-    for shard_idx, shard_path in enumerate(HYDRA_SHARDS):
-        print(f"\n{'='*60}")
-        print(f"Disk to RAM for Shard {shard_idx}: {shard_path}")
-        print(f"{'='*60}")
-
-        # Measure disk to CPU transfer (once for reference)
-        t0 = time.perf_counter()
-        cpu_index = faiss.read_index(shard_path)
-        t1 = time.perf_counter()
-        disk_to_cpu_time = t1 - t0
-        cpu_indices.append(cpu_index)
-
-        print(f"Disk -> CPU Load Time: {disk_to_cpu_time:.6f} s")
-        print(f"  Index type: {type(cpu_index).__name__}")
-        print(f"  Total vectors: {cpu_index.ntotal:,}")
-        if hasattr(cpu_index, 'nlist'):
-            print(f"  IVF lists: {cpu_index.nlist:,}")
-
-    # Measure CPU to GPU transfer (multiple trials, keep CPU index)
-    gpu_to_cpu_times = []
-    
-    # Create reusable GPU resources that will persist across all trials
-    # This allows GPU buffers to be pre-allocated on first load and reused
+    # ==============================================================
+    # Phase 1: Initialize & Load Indices
+    # ==============================================================
+    cpu_indices = load_cpu_indices()
     persistent_res = get_gpu_resources()
     
-    # Pre-allocate GPU buffer to maximum shard size to avoid fragmentation
-    # Load the largest shard first (outside the trial loop) to pre-size the buffer
-    # This prevents resize-induced fragmentation during trials
-    print(f"\n{'='*60}")
-    print(f"Pre-allocating GPU buffer to max shard size...")
-    print(f"{'='*60}")
+    preallocate_gpu_buffer(persistent_res, cpu_indices)
+    warmup_times = warmup_shards(persistent_res, cpu_indices, WARMUP_RUNS)
     
-    max_shard_idx = 0
-    max_shard_size = 0
-    for shard_idx, shard_path in enumerate(HYDRA_SHARDS):
-        shard_size = cpu_indices[shard_idx].ntotal
-        if shard_size > max_shard_size:
-            max_shard_size = shard_size
-            max_shard_idx = shard_idx
+    # ==============================================================
+    # Phase 2: Centroid Analysis
+    # ==============================================================
+    print("\n" + "="*60)
+    print("Loading Queries & Centroids")
+    print("="*60)
     
-    # Load largest shard to pre-allocate max buffer, then delete it
-    # This primes the GPU memory and prevents fragmentation during trials
-    print(f"Loading largest shard (Index {max_shard_idx}) to pre-allocate buffer...")
-
-    # Set cache path for warmup phase
-    os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = f"/data/indices/hydra_cache_shards/hydra_shard_{max_shard_idx}"
-
-    co = faiss.GpuClonerOptions()
-    co.useUnifiedMemory = USE_UNIFIED_MEMORY
-    co.useFloat16 = True
-    co.usePrecomputed = False
-    co.indicesOptions = faiss.INDICES_32_BIT
-    
-    buffer_warmup = faiss.index_cpu_to_gpu(persistent_res, 0, cpu_indices[max_shard_idx], co)
-    persistent_res.syncDefaultStreamCurrentDevice()
-    print(f"GPU buffer warmed up with Shard {max_shard_idx} (~{max_shard_size * 4 / 1e9:.1f}GB estimate)")
-    
-    # Delete the warmup buffer to free GPU memory before trials
-    # The persistent_res remains, with pre-configured GPU memory management
-    del buffer_warmup
-    clear_gpu_memory()
-    print(f"Warmup buffer deleted; persistent GPU resources ready for trials")
-    
-    # Warm up GPU Searches
-    for i in range(WARMUP_RUNS):
-        for shard_idx, shard_path in enumerate(HYDRA_SHARDS):
-            # Reuse the same GPU resources (pre-warmed)
-            # This prevents fragmentation during subsequent loads
-            print(f"\nProfiling Shard {shard_idx}: {shard_path}")
-
-            os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
-                f"/data/indices/hydra_cache_shards/hydra_shard_{shard_idx}"
-            )
-
-            co = faiss.GpuClonerOptions()
-            co.useUnifiedMemory = USE_UNIFIED_MEMORY
-            co.useFloat16 = True
-            co.usePrecomputed = False
-            co.indicesOptions = faiss.INDICES_32_BIT
-
-            t_start = time.perf_counter()
-            gpu_index = faiss.index_cpu_to_gpu(persistent_res, 0, cpu_indices[shard_idx], co)
-            persistent_res.syncDefaultStreamCurrentDevice()
-            t_end = time.perf_counter()
-
-            cpu_to_gpu_time = t_end - t_start
-
-            print(f"CPU -> GPU Transfer Time: {cpu_to_gpu_time:.6f} s")
-
-            # Get ntotal for this specific shard
-            ntotal = cpu_indices[shard_idx].ntotal
-
-            # Delete gpu_index to free GPU memory for next shard
-            del gpu_index
-            # Aggressively clear GPU memory
-            persistent_res.syncDefaultStreamCurrentDevice()
-            clear_gpu_memory()
-
-    # Start HYDRA
-
-    # --- 1. Load Queries ---
     queries = np.load(QUERY_PATH, mmap_mode='r')
-    query_vectors = queries[:10].astype('float32')
-
-    # --- 5. Load and Normalise Centroids ---
-    print("Loading global centroids...")
+    query_vectors = queries[:1000].astype('float32')
+    
     centroids = np.load(CENTROID_LIST).astype('float32')
-
     faiss.normalize_L2(query_vectors)
     faiss.normalize_L2(centroids)
-
-    # --- 6. Build Centroid Index on GPU ---
-    print("Moving centroid index to GPU...")
+    
+    # Build centroid index on GPU
     d = centroids.shape[1]
     centroid_index_cpu = faiss.IndexFlatIP(d)
     centroid_index_gpu = faiss.index_cpu_to_gpu(persistent_res, 0, centroid_index_cpu)
     centroid_index_gpu.add(centroids)
-
-    # --- 7. Search Top-100 Centroids per Query ---
-    print("Computing cosine similarity for top 100 centroids on GPU...")
+    
+    # Search top centroids
     k_centroids = 100
     similarities, centroid_ids = centroid_index_gpu.search(query_vectors, k_centroids)
-
-    # --- 8. Map Centroid IDs → Shards (GPU) ---
-    print("Loading centroid-to-shard map onto GPU...")
-    df = pd.read_csv(CENTROID_LOOKUP, dtype={"centroid_id": int, "shard_id": int})
-
-    num_centroids = df["centroid_id"].max() + 1
-    centroid_to_shard = torch.full((num_centroids,), -1, device="cuda", dtype=torch.long)
-    centroid_to_shard[
-        torch.tensor(df["centroid_id"].values, device="cuda", dtype=torch.long)
-    ] = torch.tensor(df["shard_id"].values, device="cuda", dtype=torch.long)
-
+    
+    centroid_to_shard, num_shards = get_centroid_to_shard_mapping()
     retrieved_ids_gpu = torch.tensor(centroid_ids, device="cuda", dtype=torch.long)
-    retrieved_shards  = centroid_to_shard[retrieved_ids_gpu]
-
-    num_shards = int(torch.tensor(df["shard_id"].values).max().item()) + 1
-
-    # --- 9. Print Per-Query Shard Hit Counts ---
-    print(f"\n{'='*50}")
-    print(f"Shard hit counts per query (top-{k_centroids} centroids):")
-
-    max_shard_ids = []
+    retrieved_shards = centroid_to_shard[retrieved_ids_gpu]
+    
+    # ==============================================================
+    # Phase 3: Per-Query Shard Analysis & Retrieval
+    # ==============================================================
+    print("\n" + "="*60)
+    print(f"Per-Query Analysis (top-{k_centroids} centroids)")
+    print("="*60)
+    
+    analysis_results = []
     
     for q in range(len(query_vectors)):
-        shard_counts = torch.zeros(num_shards, device="cuda", dtype=torch.long)
-        shard_counts.scatter_add_(
-            0,
-            retrieved_shards[q],
-            torch.ones(k_centroids, device="cuda", dtype=torch.long)
+        # Analyze shard hits
+        max_shard_id, shard_counts_cpu = analyze_shard_hits_per_query(
+            q, k_centroids, centroid_ids, retrieved_shards, num_shards
         )
-        shard_counts_cpu = shard_counts.cpu().numpy()
-
-        # Find shard with most centroid hits
-        max_shard_id = int(np.argmax(shard_counts_cpu))
         max_hits = shard_counts_cpu[max_shard_id]
-        max_shard_ids.append(max_shard_id)
-
-        print(f"\n  Query {q} | Top 5 Centroid IDs: {centroid_ids[q][:5]}")
-        print(f"  {'Shard ID':<12} {'Centroid Hits':<16} {'Shard File'}")
-        print(f"  {'-'*45}")
-        for shard_id, count in enumerate(shard_counts_cpu):
-            shard_name = os.path.basename(HYDRA_SHARDS[shard_id])
-            print(f"  {shard_id:<12} {count:<16} {shard_name}")
+        print_shard_analysis(q, k_centroids, centroid_ids, max_shard_id, max_hits, shard_counts_cpu)
         
-        print(f"  → Max: Shard {max_shard_id} with {max_hits} hits")
-        
+        # Load selected shard and retrieve documents
         os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
-            f"/data/indices/hydra_cache_shards/hydra_shard_{shard_idx}"
+            f"/data/indices/hydra_cache_shards/hydra_shard_{max_shard_id}"
         )
-
-        co = faiss.GpuClonerOptions()
-        co.useUnifiedMemory = USE_UNIFIED_MEMORY
-        co.useFloat16 = True
-        co.usePrecomputed = False
-        co.indicesOptions = faiss.INDICES_32_BIT
         
-        t_start = time.perf_counter()
-        gpu_index = faiss.index_cpu_to_gpu(persistent_res, 0, cpu_indices[shard_idx], co)
+        t_transfer_start = time.perf_counter()
+        gpu_index = faiss.index_cpu_to_gpu(persistent_res, 0, cpu_indices[max_shard_id], get_gpu_cloner_options())
         persistent_res.syncDefaultStreamCurrentDevice()
-        t_end = time.perf_counter()
-
-        cpu_to_gpu_time = t_end - t_start
-
-        print(f"CPU -> GPU Transfer Time: {cpu_to_gpu_time:.6f} s")
+        gpu_transfer_time = time.perf_counter() - t_transfer_start
         
-        t_batch_start = time.perf_counter()
+        t_search_start = time.perf_counter()
         distances, indices = gpu_index.search(query_vectors[q:q+1], NUM_DOCS)
         cuda_sync(persistent_res)
-        t_batch_end = time.perf_counter()
+        gpu_search_time = time.perf_counter() - t_search_start
         
-        print(f"Retrieval Time for Query {q}: {t_batch_end - t_batch_start:.6f} s")
-        print(f"Top-{NUM_DOCS} retrieved doc IDs for Query {q}: {indices[0]}")
-
-        # Delete gpu_index to free GPU memory for next shard
+        # Compute average warmup time for this shard
+        avg_warmup_time = np.mean(warmup_times[max_shard_id]) if warmup_times[max_shard_id] else 0.0
+        
+        print(f"\n  GPU Transfer: {gpu_transfer_time:.6f}s | GPU Search: {gpu_search_time:.6f}s")
+        print(f"  Avg Warmup Time: {avg_warmup_time:.6f}s")
+        print(f"  Top-{NUM_DOCS} Docs: {indices[0]}")
+        
+        # Record results
+        analysis_results.append({
+            'Query': q,
+            'ShardID': max_shard_id,
+            'GPU Transfer Time': gpu_transfer_time,
+            'GPU Search Time': gpu_search_time,
+            'Warmup Time': avg_warmup_time
+        })
+        
         del gpu_index
-        # Aggressively clear GPU memory
         persistent_res.syncDefaultStreamCurrentDevice()
         clear_gpu_memory()
-
-    print(f"\n{'='*50}")
-    print(f"Summary: Shard IDs with most hits per query: {max_shard_ids}")
-
-    # Cleanup persistent GPU resources after all trials
+    
+    # ==============================================================
+    # Phase 4: Save Results to CSV
+    # ==============================================================
+    output_file = "data/hydra_analysis.csv"
+    results_df = pd.DataFrame(analysis_results)
+    results_df.to_csv(output_file, index=False)
+    
+    print("\n" + "="*60)
+    print(f"Results saved to {output_file}")
+    print("="*60)
+    print(results_df.to_string(index=False))
+    
+    # Cleanup
     del persistent_res
     clear_gpu_memory()
 
