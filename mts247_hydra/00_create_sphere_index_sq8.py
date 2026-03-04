@@ -60,7 +60,7 @@ def build_600m_index():
         for milestone in SAVE_POINTS:
             if count >= milestone and milestone not in saved_milestones:
                 print(f"\nReached {milestone:,} milestone. Saving index...")
-                save_name = f"sphere_{milestone // 1_000_000}m_ivf_sq8.faiss"
+                save_name = f"hydra_sphere_ivf_{milestone // 1_000_000}m_sq8.faiss"
                 save_path = os.path.join(OUTPUT_DIR, save_name)
                 faiss.write_index(index, save_path)
                 saved_milestones.add(milestone)

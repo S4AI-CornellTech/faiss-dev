@@ -100,7 +100,7 @@ def main():
             for nprobe in NPROBE_LIST:
                 # Load index with current nprobe setting
                 print(f"\n[INFO] Loading CPU index with nprobe={nprobe}")
-                index_name = f"/data/indices/hydra_ivf_{index_size}_{index_quantization}.faiss"
+                index_name = f"/data/indices/hydra/hydra_sphere_ivf_{index_size}_{index_quantization}.faiss"
                 index = load_faiss_cpu_index(index_name, nprobe)
                 
                 for batch_size in BATCH_SIZE_LIST:

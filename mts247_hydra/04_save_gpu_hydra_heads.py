@@ -9,19 +9,21 @@ import shutil
 # Config
 # ==============================================================
 HYDRA_SHARDS = [
-    "/data/indices/shards/hydra_head_0.faiss", 
-    "/data/indices/shards/hydra_head_1.faiss", 
-    "/data/indices/shards/hydra_head_2.faiss", 
-    "/data/indices/shards/hydra_head_3.faiss", 
-    "/data/indices/shards/hydra_head_4.faiss", 
-    "/data/indices/shards/hydra_head_5.faiss", 
+    "/data/indices/hydra/shards/hydra_head_0.faiss", 
+    "/data/indices/hydra/shards/hydra_head_1.faiss", 
+    "/data/indices/hydra/shards/hydra_head_2.faiss", 
+    "/data/indices/hydra/shards/hydra_head_3.faiss", 
+    "/data/indices/hydra/shards/hydra_head_4.faiss", 
+    "/data/indices/hydra/shards/hydra_head_5.faiss", 
+    "/data/indices/hydra/shards/hydra_head_6.faiss", 
+    "/data/indices/hydra/shards/hydra_head_7.faiss", 
 ]
 
-OUTPUT_DIR = "/data/indices/hydra_cache_shards"
+OUTPUT_DIR = "/data/indices/hydra/hydra_cache_shards"
 PINNED_MEM_BYTES = 2 * 1024 * 1024 * 1024
 
 def clear_cache():
-    cache_path = "/data/indices/hydra_cache_shards"
+    cache_path = "/data/indices/hydra/hydra_cache_shards"
     if os.path.exists(cache_path):
         for filename in os.listdir(cache_path):
             file_path = os.path.join(cache_path, filename)
