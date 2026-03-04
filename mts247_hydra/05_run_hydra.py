@@ -223,12 +223,13 @@ def main():
     query_vectors = queries[:1000].astype('float32')
     
     centroids = np.load(CENTROID_LIST).astype('float32')
-    faiss.normalize_L2(query_vectors)
-    faiss.normalize_L2(centroids)
+    # DO NOT normalize - indices were built with unnormalized data and L2 metric
+    # faiss.normalize_L2(query_vectors)
+    # faiss.normalize_L2(centroids)
     
-    # Build centroid index on GPU
+    # Build centroid index on GPU - use L2 to match shard metric
     d = centroids.shape[1]
-    centroid_index_cpu = faiss.IndexFlatIP(d)
+    centroid_index_cpu = faiss.IndexFlatL2(d)
     centroid_index_gpu = faiss.index_cpu_to_gpu(persistent_res, 0, centroid_index_cpu)
     centroid_index_gpu.add(centroids)
     
