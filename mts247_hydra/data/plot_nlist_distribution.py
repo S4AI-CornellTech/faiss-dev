@@ -26,6 +26,29 @@ def main():
     # Convert to MB
     sizes_mb = (vector_counts * BYTES_PER_VECTOR) / BYTES_TO_MB
 
+    # ---- Calculate top nlists until 90GB reached ----
+    TARGET_GB = 90
+    TARGET_MB = TARGET_GB * 1024
+    
+    # Sort sizes in descending order
+    sorted_sizes_mb = np.sort(sizes_mb)[::-1]
+    
+    cumulative_sum = 0
+    num_nlists_for_90gb = 0
+    
+    for i, size_mb in enumerate(sorted_sizes_mb):
+        cumulative_sum += size_mb
+        if cumulative_sum >= TARGET_MB:
+            num_nlists_for_90gb = i + 1
+            break
+    
+    print(f"\n{'='*60}")
+    print(f"Top nlists needed to reach {TARGET_GB}GB: {num_nlists_for_90gb}")
+    print(f"Actual size: {cumulative_sum:.2f} MB ({cumulative_sum/1024:.2f} GB)")
+    print(f"Total nlists in index: {len(sizes_mb)}")
+    print(f"Percentage of nlists: {100*num_nlists_for_90gb/len(sizes_mb):.2f}%")
+    print(f"{'='*60}\n")
+
     # ---- Plot ----
     plt.figure(figsize=(12, 7))
 

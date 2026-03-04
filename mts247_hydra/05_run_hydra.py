@@ -234,7 +234,7 @@ def main():
     centroid_index_gpu.add(centroids)
     
     # Search top centroids
-    k_centroids = 100
+    k_centroids = 25
     similarities, centroid_ids = centroid_index_gpu.search(query_vectors, k_centroids)
     
     centroid_to_shard, num_shards = get_centroid_to_shard_mapping()
@@ -256,7 +256,7 @@ def main():
             q, k_centroids, centroid_ids, retrieved_shards, num_shards
         )
         max_hits = shard_counts_cpu[max_shard_id]
-        print_shard_analysis(q, k_centroids, centroid_ids, max_shard_id, max_hits, shard_counts_cpu, hydra_shards)
+        # print_shard_analysis(q, k_centroids, centroid_ids, max_shard_id, max_hits, shard_counts_cpu, hydra_shards)
         
         # Load selected shard and retrieve documents
         os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
@@ -286,7 +286,8 @@ def main():
             'ShardID': max_shard_id,
             'GPU Transfer Time': gpu_transfer_time,
             'GPU Search Time': gpu_search_time,
-            'Warmup Time': avg_warmup_time
+            'Warmup Time': avg_warmup_time,
+            'TopDocs': ','.join(map(str, indices[0].tolist()))
         })
         
         del gpu_index
