@@ -27,6 +27,8 @@ QUERY_PATH = "triviaqa_encodings.npy"
 CENTROID_LIST = "/data/indices/hydra/hydra_centroids.npy"
 CENTROID_LOOKUP = "/data/indices/hydra/centroid_to_shard_map.csv"
 
+NUM_QUERIES=5
+
 NUM_DOCS = 5
 WARMUP_RUNS = 3
 TRIALS = 100
@@ -220,7 +222,7 @@ def main():
     print("="*60)
     
     queries = np.load(QUERY_PATH, mmap_mode='r')
-    query_vectors = queries[:1000].astype('float32')
+    query_vectors = queries[:NUM_QUERIES].astype('float32')
     
     centroids = np.load(CENTROID_LIST).astype('float32')
     # DO NOT normalize - indices were built with unnormalized data and L2 metric
