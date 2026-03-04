@@ -43,7 +43,7 @@ REUSE_RESOURCES = True
 
 def get_gpu_resources():
     res = faiss.StandardGpuResources()
-    res.setTempMemory(TEMP_MEM_BYTES)
+    res.noTempMemory()  # Allocate permanent memory, not temporary
     res.setPinnedMemory(PINNED_MEM_BYTES)
     return res
 
@@ -108,11 +108,20 @@ def warmup_shards(persistent_res, cpu_indices, num_warmup_runs):
     print(f"Warmup Phase ({num_warmup_runs} runs)")
     print("="*60)
     
+    # Find the largest shard to pre-allocate max GPU memory
+    largest_shard_idx = max(range(len(cpu_indices)), key=lambda i: cpu_indices[i].ntotal)
+    print(f"\nLargest shard: {largest_shard_idx} with {cpu_indices[largest_shard_idx].ntotal:,} vectors")
+    print("Loading largest shard FIRST to pre-allocate GPU memory pool...\n")
+    
     warmup_times = {i: [] for i in range(len(HYDRA_SHARDS))}
     
     for run in range(num_warmup_runs):
         print(f"\nWarmup Run {run + 1}/{num_warmup_runs}")
-        for shard_idx in range(len(HYDRA_SHARDS)):
+        
+        # Create order: largest first, then all others in sequence
+        shard_order = [largest_shard_idx] + [i for i in range(len(HYDRA_SHARDS)) if i != largest_shard_idx]
+        
+        for shard_idx in shard_order:
             os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
                 f"/data/indices/hydra/hydra_cache_shards/hydra_shard_{shard_idx}"
             )
@@ -177,7 +186,7 @@ def main():
     os.environ["FAISS_GPU_PACKED_LISTS_MMAP"] = "1"
     os.environ["FAISS_GPU_DEVICEVECTOR_CACHE"] = "1"
     os.environ["FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES"] = str(1 << 30)
-    os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"] = "1"
+    os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"] = "0"
     os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"] = "0"
 
     # ==============================================================
@@ -261,7 +270,8 @@ def main():
             'ShardID': max_shard_id,
             'GPU Transfer Time': gpu_transfer_time,
             'GPU Search Time': gpu_search_time,
-            'Warmup Time': avg_warmup_time
+            'Warmup Time': avg_warmup_time,
+            'Retrieved Doc IDs': indices[0].tolist()
         })
         
         del gpu_index
