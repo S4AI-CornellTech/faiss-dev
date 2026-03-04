@@ -4,23 +4,30 @@ import gc
 import faiss
 from tqdm import tqdm
 import shutil
+import glob
+import re
 
 # ==============================================================
 # Config
 # ==============================================================
-HYDRA_SHARDS = [
-    "/data/indices/hydra/shards/hydra_head_0.faiss", 
-    "/data/indices/hydra/shards/hydra_head_1.faiss", 
-    "/data/indices/hydra/shards/hydra_head_2.faiss", 
-    "/data/indices/hydra/shards/hydra_head_3.faiss", 
-    "/data/indices/hydra/shards/hydra_head_4.faiss", 
-    "/data/indices/hydra/shards/hydra_head_5.faiss", 
-    "/data/indices/hydra/shards/hydra_head_6.faiss", 
-    "/data/indices/hydra/shards/hydra_head_7.faiss", 
-]
+SHARDS_DIR = "/data/indices/hydra/shards"
+SHARD_GLOB = "hydra_head_*.faiss"
 
 OUTPUT_DIR = "/data/indices/hydra/hydra_cache_shards"
 PINNED_MEM_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def discover_shards(shards_dir, shard_glob):
+    shard_paths = glob.glob(os.path.join(shards_dir, shard_glob))
+
+    def shard_sort_key(path):
+        filename = os.path.basename(path)
+        match = re.search(r"(\d+)", filename)
+        shard_id = int(match.group(1)) if match else float("inf")
+        return (shard_id, filename)
+
+    shard_paths.sort(key=shard_sort_key)
+    return shard_paths
 
 def clear_cache():
     cache_path = "/data/indices/hydra/hydra_cache_shards"
@@ -47,11 +54,19 @@ def main():
     os.environ["FAISS_GPU_PACKED_LISTS_MMAP"] = "1"
     os.environ["FAISS_GPU_DEVICEVECTOR_CACHE"] = "1"
 
+    hydra_shards = discover_shards(SHARDS_DIR, SHARD_GLOB)
+    if not hydra_shards:
+        raise FileNotFoundError(
+            f"No shard files found in {SHARDS_DIR} matching pattern {SHARD_GLOB}"
+        )
+
+    print(f"Found {len(hydra_shards)} shard files in {SHARDS_DIR} matching {SHARD_GLOB}")
+
     res = get_gpu_resources()
 
     clear_cache()
 
-    for i, shard_path in enumerate(tqdm(HYDRA_SHARDS, desc="Saving shard contents via CPU->GPU transfer")):
+    for i, shard_path in enumerate(tqdm(hydra_shards, desc="Saving shard contents via CPU->GPU transfer")):
         # Set cache path for this shard
         os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = f"{OUTPUT_DIR}/hydra_shard_{i}"
         

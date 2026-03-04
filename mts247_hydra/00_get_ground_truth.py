@@ -50,28 +50,42 @@ def warmup(index, k, embeddings, batch_size, warmup_batches):
     for batch in _iterate_batches(embeddings, batch_size, warmup_batches):
         _ = index.search(batch, k)
 
-def measure(index, k, embeddings, batch_size, measure_batches):
+def measure(index, k, embeddings, batch_size, measure_batches, writer, output_file, run_meta):
     times = []
-    all_distances = []
-    all_indices = []
-    for batch in tqdm(
+    for batch_idx, batch in enumerate(tqdm(
         _iterate_batches(embeddings, batch_size, measure_batches),
         total=measure_batches,
         desc=f"Measuring ({measure_batches} batches)",
         leave=False
-    ):
+    )):
         start = time.time()
         distances, indices = index.search(batch, k)
         end = time.time()
-        times.append(end - start)
-        all_distances.append(distances)
-        all_indices.append(indices)
+        search_time_s = end - start
+        times.append(search_time_s)
+
+        batch_start_query = batch_idx * batch_size
+        for row_idx_in_batch in range(len(indices)):
+            query_idx = batch_start_query + row_idx_in_batch
+            top_5_ids = indices[row_idx_in_batch][:5].tolist() if len(indices[row_idx_in_batch]) > 0 else []
+
+            writer.writerow({
+                "query": query_idx,
+                "index_size": run_meta["index_size"],
+                "threads": run_meta["threads"],
+                "nprobe": run_meta["nprobe"],
+                "batch_size": run_meta["batch_size"],
+                "num_retrieved_docs": run_meta["num_retrieved_docs"],
+                "avg_query_time": search_time_s / max(1, len(batch)),
+                "best_retrieved_ids": str(top_5_ids)
+            })
+
+        output_file.flush()  # persist to disk after each search() call
+
     if not times:
-        return 0.0, [], []
+        return 0.0
     avg_time = sum(times) / len(times)
-    all_distances = np.concatenate(all_distances, axis=0) if all_distances else np.array([])
-    all_indices = np.concatenate(all_indices, axis=0) if all_indices else np.array([])
-    return avg_time, all_distances, all_indices  # average per-batch time in seconds, distances, and indices
+    return avg_time  # average per-batch time in seconds
 
 def main():
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
@@ -100,7 +114,7 @@ def main():
             for nprobe in NPROBE_LIST:
                 # Load index with current nprobe setting
                 print(f"\n[INFO] Loading CPU index with nprobe={nprobe}")
-                index_name = f"/data/indices/hydra_ivf_{index_size}_{index_quantization}.faiss"
+                index_name = f"/data/indices/hydra/hydra_sphere_ivf_{index_size}_{index_quantization}.faiss"
                 index = load_faiss_cpu_index(index_name, nprobe)
                 
                 for batch_size in BATCH_SIZE_LIST:
@@ -115,26 +129,23 @@ def main():
                         # Warmup (unmeasured)
                         warmup(index, retrieved_docs, queries, batch_size, WARMUP_BATCHES)
 
-                        # Measure
-                        avg_batch_time_s, distances, indices = measure(index, retrieved_docs, queries, batch_size, MAX_BATCHES)
-
-                        # Process results for each query in the batch
-                        for i, query_idx in enumerate(range(0, min(len(queries), MAX_BATCHES * batch_size), batch_size)):
-                            if i < len(indices):
-                                # Get top 5 retrieved doc IDs
-                                top_5_ids = indices[i][:5].tolist() if len(indices[i]) > 0 else []
-                                
-                                writer.writerow({
-                                    "query": query_idx,
-                                    "index_size": index_size,
-                                    "threads": NUM_THREADS,
-                                    "nprobe": nprobe,
-                                    "batch_size": batch_size,
-                                    "num_retrieved_docs": retrieved_docs,
-                                    "avg_query_time": avg_batch_time_s,
-                                    "best_retrieved_ids": str(top_5_ids)
-                                })
-                        f.flush()  # ensure progress hits disk each iteration
+                        # Measure and stream per-search results to CSV
+                        avg_batch_time_s = measure(
+                            index,
+                            retrieved_docs,
+                            queries,
+                            batch_size,
+                            MAX_BATCHES,
+                            writer,
+                            f,
+                            {
+                                "index_size": index_size,
+                                "threads": NUM_THREADS,
+                                "nprobe": nprobe,
+                                "batch_size": batch_size,
+                                "num_retrieved_docs": retrieved_docs,
+                            },
+                        )
                         
                         print(f"[RESULT] {avg_batch_time_s:.6f}s avg per batch")
 

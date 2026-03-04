@@ -3,6 +3,8 @@ import os
 import time
 import csv
 import gc
+import glob
+import re
 import torch
 import shutil
 import numpy as np
@@ -19,16 +21,8 @@ except ImportError:
 # ==============================================================
 # Config
 # ==============================================================
-HYDRA_SHARDS = [
-    "/data/indices/hydra/shards/hydra_head_0.faiss", 
-    "/data/indices/hydra/shards/hydra_head_1.faiss", 
-    "/data/indices/hydra/shards/hydra_head_2.faiss", 
-    "/data/indices/hydra/shards/hydra_head_3.faiss", 
-    "/data/indices/hydra/shards/hydra_head_4.faiss",
-    "/data/indices/hydra/shards/hydra_head_5.faiss",
-    "/data/indices/hydra/shards/hydra_head_6.faiss",
-    "/data/indices/hydra/shards/hydra_head_7.faiss"
-]
+SHARDS_DIR = "/data/indices/hydra/shards"
+SHARD_GLOB = "hydra_head_*.faiss"
 QUERY_PATH = "triviaqa_encodings.npy"
 CENTROID_LIST = "/data/indices/hydra/hydra_centroids.npy"
 CENTROID_LOOKUP = "/data/indices/hydra/centroid_to_shard_map.csv"
@@ -40,6 +34,19 @@ USE_UNIFIED_MEMORY = False
 PINNED_MEM_BYTES = 2 * 1024 * 1024 * 1024
 TEMP_MEM_BYTES = 0
 REUSE_RESOURCES = True
+
+
+def discover_shards(shards_dir, shard_glob):
+    shard_paths = glob.glob(os.path.join(shards_dir, shard_glob))
+
+    def shard_sort_key(path):
+        filename = os.path.basename(path)
+        match = re.search(r"(\d+)", filename)
+        shard_id = int(match.group(1)) if match else float("inf")
+        return (shard_id, filename)
+
+    shard_paths.sort(key=shard_sort_key)
+    return shard_paths
 
 def get_gpu_resources():
     res = faiss.StandardGpuResources()
@@ -82,14 +89,14 @@ def get_gpu_cloner_options():
     co.indicesOptions = faiss.INDICES_32_BIT
     return co
 
-def load_cpu_indices():
+def load_cpu_indices(hydra_shards):
     """Load all shard indices from disk to CPU."""
     print("\n" + "="*60)
     print("Loading Shard Indices from Disk")
     print("="*60)
     
     cpu_indices = []
-    for shard_idx, shard_path in enumerate(HYDRA_SHARDS):
+    for shard_idx, shard_path in enumerate(hydra_shards):
         print(f"\nShard {shard_idx}: {shard_path}")
         t0 = time.perf_counter()
         cpu_index = faiss.read_index(shard_path)
@@ -102,7 +109,7 @@ def load_cpu_indices():
     
     return cpu_indices
 
-def warmup_shards(persistent_res, cpu_indices, num_warmup_runs):
+def warmup_shards(persistent_res, cpu_indices, num_warmup_runs, hydra_shards):
     """Warmup GPU with repeated shard loads and searches."""
     print("\n" + "="*60)
     print(f"Warmup Phase ({num_warmup_runs} runs)")
@@ -113,13 +120,13 @@ def warmup_shards(persistent_res, cpu_indices, num_warmup_runs):
     print(f"\nLargest shard: {largest_shard_idx} with {cpu_indices[largest_shard_idx].ntotal:,} vectors")
     print("Loading largest shard FIRST to pre-allocate GPU memory pool...\n")
     
-    warmup_times = {i: [] for i in range(len(HYDRA_SHARDS))}
+    warmup_times = {i: [] for i in range(len(hydra_shards))}
     
     for run in range(num_warmup_runs):
         print(f"\nWarmup Run {run + 1}/{num_warmup_runs}")
         
         # Create order: largest first, then all others in sequence
-        shard_order = [largest_shard_idx] + [i for i in range(len(HYDRA_SHARDS)) if i != largest_shard_idx]
+        shard_order = [largest_shard_idx] + [i for i in range(len(hydra_shards)) if i != largest_shard_idx]
         
         for shard_idx in shard_order:
             os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
@@ -169,13 +176,13 @@ def analyze_shard_hits_per_query(query_idx, k_centroids, centroid_ids, retrieved
     
     return max_shard_id, shard_counts_cpu
 
-def print_shard_analysis(query_idx, k_centroids, centroid_ids, max_shard_id, max_hits, shard_counts_cpu):
+def print_shard_analysis(query_idx, k_centroids, centroid_ids, max_shard_id, max_hits, shard_counts_cpu, hydra_shards):
     """Print shard analysis results for a query."""
     print(f"\n  Query {query_idx} | Top 5 Centroid IDs: {centroid_ids[query_idx][:5]}")
     print(f"  {'Shard ID':<12} {'Centroid Hits':<16} {'Shard File'}")
     print(f"  {'-'*45}")
     for shard_id, count in enumerate(shard_counts_cpu):
-        shard_name = os.path.basename(HYDRA_SHARDS[shard_id])
+        shard_name = os.path.basename(hydra_shards[shard_id])
         print(f"  {shard_id:<12} {count:<16} {shard_name}")
     print(f"  → Selected Shard: {max_shard_id} with {max_hits} hits")
 
@@ -186,16 +193,24 @@ def main():
     os.environ["FAISS_GPU_PACKED_LISTS_MMAP"] = "1"
     os.environ["FAISS_GPU_DEVICEVECTOR_CACHE"] = "1"
     os.environ["FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES"] = str(1 << 30)
-    os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"] = "0"
+    os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"] = "1"
     os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"] = "0"
+
+    hydra_shards = discover_shards(SHARDS_DIR, SHARD_GLOB)
+    if not hydra_shards:
+        raise FileNotFoundError(
+            f"No shard files found in {SHARDS_DIR} matching pattern {SHARD_GLOB}"
+        )
+
+    print(f"Found {len(hydra_shards)} shard files in {SHARDS_DIR} matching {SHARD_GLOB}")
 
     # ==============================================================
     # Phase 1: Initialize & Load Indices
     # ==============================================================
-    cpu_indices = load_cpu_indices()
+    cpu_indices = load_cpu_indices(hydra_shards)
     persistent_res = get_gpu_resources()
     
-    warmup_times = warmup_shards(persistent_res, cpu_indices, WARMUP_RUNS)
+    warmup_times = warmup_shards(persistent_res, cpu_indices, WARMUP_RUNS, hydra_shards)
     
     # ==============================================================
     # Phase 2: Centroid Analysis
@@ -240,7 +255,7 @@ def main():
             q, k_centroids, centroid_ids, retrieved_shards, num_shards
         )
         max_hits = shard_counts_cpu[max_shard_id]
-        print_shard_analysis(q, k_centroids, centroid_ids, max_shard_id, max_hits, shard_counts_cpu)
+        print_shard_analysis(q, k_centroids, centroid_ids, max_shard_id, max_hits, shard_counts_cpu, hydra_shards)
         
         # Load selected shard and retrieve documents
         os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
@@ -270,8 +285,7 @@ def main():
             'ShardID': max_shard_id,
             'GPU Transfer Time': gpu_transfer_time,
             'GPU Search Time': gpu_search_time,
-            'Warmup Time': avg_warmup_time,
-            'Retrieved Doc IDs': indices[0].tolist()
+            'Warmup Time': avg_warmup_time
         })
         
         del gpu_index
