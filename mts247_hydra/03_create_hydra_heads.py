@@ -10,7 +10,7 @@ import csv
 INDEX_PATH = "/data/indices/hydra/hydra_sphere_ivf_300m_sq8.faiss"
 OUTPUT_DIR = "/data/indices/hydra/shards/"
 MAPPING_FILE = "/data/indices/hydra/centroid_to_shard_map.csv"
-INDEX_SIZE = 1993  # Number of original clusters per shard
+INDEX_SIZE = 1993    # Number of original clusters per shard
 # ==============================================================
 
 def extract_ivf_index(index):
@@ -21,32 +21,29 @@ def extract_ivf_index(index):
         raise ValueError(f"Expected IndexIVF, got {type(index)}")
     return index
 
-def copy_sq_params(src_ivf, dst_ivf):
-    """Copy trained ScalarQuantizer parameters from source to destination."""
-    src_trained = faiss.vector_to_array(src_ivf.sq.trained)
-    faiss.copy_array_to_vector(src_trained, dst_ivf.sq.trained)
-    dst_ivf.sq.code_size = src_ivf.sq.code_size
-
 def main():
     if not os.path.exists(INDEX_PATH):
         raise FileNotFoundError(f"Index file not found: {INDEX_PATH}")
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
 
-    print(f"Loading large index from {INDEX_PATH}...")
+    print(f"Loading index from {INDEX_PATH}...")
     index = faiss.read_index(INDEX_PATH, faiss.IO_FLAG_MMAP)
     ivf_index = extract_ivf_index(index)
 
     nlist = ivf_index.nlist
     d = ivf_index.d
-    src_code_size = ivf_index.invlists.code_size
-    src_nprobe = ivf_index.nprobe
+    
+    # Determine the metric type from source index
+    metric_type = ivf_index.metric_type
+    metric_str = "IP" if metric_type == faiss.METRIC_INNER_PRODUCT else "L2"
+    
     num_shards = int(np.ceil(nlist / INDEX_SIZE))
 
-    print(f"Total nlist: {nlist} | d: {d} | code_size: {src_code_size} | Target Shards: {num_shards}")
+    print(f"Total nlist: {nlist} | d: {d} | Metric: {metric_str} | Target Shards: {num_shards}")
 
     # 1. Extract and cluster centroids
-    print("Extracting and grouping centroids...")
+    print("Extracting and clustering centroids...")
     centroids = ivf_index.quantizer.reconstruct_n(0, nlist)
 
     kmeans = faiss.Kmeans(d, num_shards, niter=20, verbose=True)
@@ -63,62 +60,99 @@ def main():
         for c_id, s_id in enumerate(shard_assignments):
             writer.writerow([c_id, s_id])
 
-    # 2. Process shards
+    # 2. Process each shard: extract vectors and build new index
+    invlists = ivf_index.invlists
+    
     for s_id in range(num_shards):
-        print(f"\nCreating shard {s_id}...")
-        lists_in_shard = np.where(shard_assignments == s_id)[0].astype('int64')
+        print(f"\n{'='*60}")
+        print(f"Processing shard {s_id}/{num_shards}...")
+        print(f"{'='*60}")
+        
+        # Find which nlists belong to this shard
+        lists_in_shard = np.where(shard_assignments == s_id)[0]
         shard_nlist = len(lists_in_shard)
+        print(f"Shard contains {shard_nlist} nlists: {lists_in_shard[:5]}..." if len(lists_in_shard) > 5 else f"Shard contains {shard_nlist} nlists: {lists_in_shard}")
 
-        # Build quantizer seeded with the shard's centroids
-        quantizer = faiss.IndexFlatL2(d)
-        shard_centroids = centroids[lists_in_shard]
-        quantizer.add(shard_centroids)
-
-        shard_index = faiss.IndexIVFScalarQuantizer(
-            quantizer, d, shard_nlist, faiss.ScalarQuantizer.QT_8bit
-        )
-
-        # --- FIX 1: Copy trained SQ parameters from the source index ---
-        copy_sq_params(ivf_index, shard_index)
-        shard_index.is_trained = True
-
-        # --- FIX 2: Validate code size matches before copying raw bytes ---
-        assert shard_index.invlists.code_size == src_code_size, (
-            f"Code size mismatch: src={src_code_size}, shard={shard_index.invlists.code_size}"
-        )
-
-        # --- FIX 3: Set nprobe so the shard is actually searchable ---
-        shard_index.nprobe = min(shard_nlist, src_nprobe)
-
-        invlists = ivf_index.invlists
-
-        for new_list_idx, old_list_idx in enumerate(lists_in_shard):
-            list_size = invlists.list_size(int(old_list_idx))
+        # Extract all vectors and IDs from this shard's nlists
+        all_vectors = []
+        all_ids = []
+        total_vectors = 0
+        
+        for idx, list_idx in enumerate(lists_in_shard):
+            list_size = invlists.list_size(int(list_idx))
             if list_size == 0:
                 continue
-
-            ids_ptr = invlists.get_ids(int(old_list_idx))
-            codes_ptr = invlists.get_codes(int(old_list_idx))
-
-            # --- FIX 4: Always release pointers after use ---
+            
+            ids_ptr = invlists.get_ids(int(list_idx))
+            codes_ptr = invlists.get_codes(int(list_idx))
+            
             try:
-                shard_index.invlists.add_entries(
-                    int(new_list_idx),
-                    list_size,
-                    ids_ptr,
-                    codes_ptr
-                )
-                shard_index.ntotal += list_size
+                # Extract IDs
+                ids = faiss.rev_swig_ptr(ids_ptr, list_size).copy()
+                all_ids.append(ids)
+                
+                # Reconstruct vectors using the proper IVF method
+                # This uses list_no and offset within the list
+                # Reconstruct vectors using the proper IVF method
+                vectors = np.zeros((list_size, d), dtype=np.float32)
+                for i in range(list_size):
+                    # Use faiss.swig_ptr to explicitly pass the memory address of the row
+                    ivf_index.reconstruct_from_offset(int(list_idx), i, faiss.swig_ptr(vectors[i]))
+                
+                all_vectors.append(vectors)
+                total_vectors += list_size
+                
             finally:
-                invlists.release_ids(int(old_list_idx), ids_ptr)
-                invlists.release_codes(int(old_list_idx), codes_ptr)
-
+                invlists.release_ids(int(list_idx), ids_ptr)
+                invlists.release_codes(int(list_idx), codes_ptr)
+            
+            if (idx + 1) % 100 == 0:
+                print(f"  Processed {idx + 1}/{shard_nlist} nlists ({total_vectors} vectors so far)...")
+        
+        if len(all_vectors) == 0:
+            print(f"  Warning: No vectors found in shard {s_id}, skipping...")
+            continue
+        
+        # Concatenate all vectors and IDs
+        print(f"  Concatenating {len(all_vectors)} batches...")
+        shard_vectors = np.vstack(all_vectors)
+        shard_ids = np.concatenate(all_ids)
+        
+        print(f"  Extracted {len(shard_vectors)} vectors with original IDs preserved")
+        
+        # Build new SQ8 index for this shard (same format as source index)
+        nlist_new = int(np.sqrt(len(shard_vectors)))
+        print(f"  Creating IndexIVFScalarQuantizer with {nlist_new} clusters (sqrt of {len(shard_vectors)}) using {metric_str} metric...")
+        
+        if metric_type == faiss.METRIC_INNER_PRODUCT:
+            quantizer = faiss.IndexFlatIP(d)
+        else:
+            quantizer = faiss.IndexFlatL2(d)
+            
+        shard_index = faiss.IndexIVFScalarQuantizer(
+            quantizer, d, nlist_new, faiss.ScalarQuantizer.QT_8bit, metric_type
+        )
+        
+        # Train the index on the shard's vectors
+        print(f"  Training SQ8 index...")
+        shard_index.train(shard_vectors)
+        
+        # Set a reasonable nprobe value
+        shard_index.nprobe = min(nlist_new, 10)
+        
+        # Add vectors with their original IDs
+        print(f"  Adding {len(shard_vectors)} vectors with original IDs...")
+        shard_index.add_with_ids(shard_vectors, shard_ids)
+        
+        # Save the shard
         shard_name = f"hydra_head_{s_id}.faiss"
         output_file = os.path.join(OUTPUT_DIR, shard_name)
         faiss.write_index(shard_index, output_file)
-        print(f"Saved {shard_name} | {shard_nlist} clusters | {shard_index.ntotal} vectors | nprobe={shard_index.nprobe}")
+        print(f"  ✓ Saved {shard_name} | {shard_index.ntotal} vectors | {nlist_new} clusters | nprobe={shard_index.nprobe}")
 
-    print(f"\nAll shards and mapping file created successfully in {OUTPUT_DIR}.")
+    print(f"\n{'='*60}")
+    print(f"All {num_shards} shards created successfully in {OUTPUT_DIR}")
+    print(f"{'='*60}")
 
 if __name__ == "__main__":
     main()

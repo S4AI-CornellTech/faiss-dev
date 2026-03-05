@@ -10,16 +10,16 @@ import multiprocessing
 # === Config ===
 index_quantization = "sq8"
 QUERY_FILE = "triviaqa_encodings.npy"
-OUTPUT_FILE = f"data/hydra_baseline_bs_32.csv"
+OUTPUT_FILE = f"data/hydra_baseline_bs_1.csv"
 
 # Lists of parameters to iterate through
 NPROBE_LIST          = [256]         # list of nprobe values
-BATCH_SIZE_LIST      = [32]          # list of batch sizes
+BATCH_SIZE_LIST      = [1]          # list of batch sizes
 RETRIEVED_DOCS_LIST  = [5]             # list of top-k values
 INDEX_SIZE_LIST      = ["300m"]
 
-MAX_BATCHES     = 1000        # measured batches (after warmup)
-WARMUP_BATCHES  = 10           # unmeasured warmup batches
+MAX_BATCHES     = 5        # measured batches (after warmup)
+WARMUP_BATCHES  = 0           # unmeasured warmup batches
 
 # Automatically detect all available threads
 NUM_THREADS = multiprocessing.cpu_count()

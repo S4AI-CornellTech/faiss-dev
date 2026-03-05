@@ -13,13 +13,13 @@ QUERY_FILE = "triviaqa_encodings.npy"
 OUTPUT_FILE = f"data/hydra_monolithic_ground_truth.csv"
 
 # Lists of parameters to iterate through
-NPROBE_LIST          = [17320]         # list of nprobe values
+NPROBE_LIST          = [24494]         # list of nprobe values
 BATCH_SIZE_LIST      = [1]          # list of batch sizes
 RETRIEVED_DOCS_LIST  = [5]             # list of top-k values
 INDEX_SIZE_LIST      = ["300m"]
 
-MAX_BATCHES     = 500        # measured batches (after warmup)
-WARMUP_BATCHES  = 10           # unmeasured warmup batches
+MAX_BATCHES     = 5        # measured batches (after warmup)
+WARMUP_BATCHES  = 0           # unmeasured warmup batches
 
 # Automatically detect all available threads
 NUM_THREADS = multiprocessing.cpu_count()
