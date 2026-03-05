@@ -87,6 +87,52 @@ def detect_column(rows: List[Dict[str, str]], candidates: List[str], role: str, 
     )
 
 
+def parse_float(raw: Any) -> float:
+    if raw is None:
+        return float("nan")
+    text = str(raw).strip()
+    if text == "" or text.lower() in {"nan", "none", "null"}:
+        return float("nan")
+    try:
+        return float(text)
+    except ValueError:
+        return float("nan")
+
+
+def average_latency_monolithic(rows: List[Dict[str, str]], source_name: str) -> Tuple[float, str]:
+    latency_col = detect_column(rows, ["avg_query_time", "AvgQueryTime"], "latency", source_name)
+    values = [parse_float(r.get(latency_col, "")) for r in rows]
+    valid = [v for v in values if not math.isnan(v)]
+    avg = (sum(valid) / len(valid)) if valid else 0.0
+    return avg, latency_col
+
+
+def average_latency_hydra(rows: List[Dict[str, str]], source_name: str) -> Tuple[float, str, str]:
+    transfer_col = detect_column(
+        rows,
+        ["gpu_transfer_time", "GPU Transfer Time", "gpu transfer time"],
+        "gpu transfer time",
+        source_name,
+    )
+    search_col = detect_column(
+        rows,
+        ["gpu_search_time", "GPU Search Time", "gpu search time"],
+        "gpu search time",
+        source_name,
+    )
+
+    latencies: List[float] = []
+    for row in rows:
+        t_transfer = parse_float(row.get(transfer_col, ""))
+        t_search = parse_float(row.get(search_col, ""))
+        if math.isnan(t_transfer) or math.isnan(t_search):
+            continue
+        latencies.append(t_transfer + t_search)
+
+    avg = (sum(latencies) / len(latencies)) if latencies else 0.0
+    return avg, transfer_col, search_col
+
+
 def build_row_map(rows: List[Dict[str, str]], query_col: str) -> Dict[str, Dict[str, str]]:
     mapped: Dict[str, Dict[str, str]] = {}
     for row in rows:
@@ -212,10 +258,10 @@ def main() -> None:
 
     for system_name, system_path in systems:
         system_rows = read_csv(system_path)
-        system_query_col = detect_column(system_rows, ["query", "Query"], "query", system_name)
+        system_query_col = detect_column(system_rows, ["query"], "query", system_name)
         system_ids_col = detect_column(
             system_rows,
-            ["best_retrieved_ids", "top_docs", "TopDocs"],
+            ["best_retrieved_ids"],
             "retrieved ids",
             system_name,
         )
@@ -239,10 +285,18 @@ def main() -> None:
                 hydra_col=system_ids_col,
             )
 
+        if system_name == "Monolithic":
+            avg_latency, latency_col = average_latency_monolithic(system_rows, system_name)
+            latency_desc = f"avg({latency_col})"
+        else:
+            avg_latency, transfer_col, search_col = average_latency_hydra(system_rows, system_name)
+            latency_desc = f"avg({transfer_col} + {search_col})"
+
         print(f"\n{system_name}:")
         print(f"  File:              {system_path}")
         print(f"  Query column:      {system_query_col}")
         print(f"  Retrieved-id col:  {system_ids_col}")
+        print(f"  Avg latency (s):   {avg_latency:.6f} [{latency_desc}]")
         print(f"  Evaluated queries: {int(summary['evaluated_queries'])}")
         print(f"  Average recall:    {summary['avg_recall']:.6f}")
         print(f"  Hit rate:          {summary['hit_rate']:.6f}")
