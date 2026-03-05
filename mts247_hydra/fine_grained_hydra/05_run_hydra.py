@@ -30,7 +30,7 @@ CENTROID_LOOKUP = "/data/indices/hydra/centroid_to_shard_map.csv"
 NUM_QUERIES = 5
 
 NUM_DOCS = 5
-WARMUP_RUNS = 3
+WARMUP_RUNS = 2
 TRIALS = 100
 USE_UNIFIED_MEMORY = False
 PINNED_MEM_BYTES = 2 * 1024 * 1024 * 1024
@@ -238,7 +238,7 @@ def main():
     centroid_index_gpu.add(centroids)
     
     # Search top centroids
-    k_centroids = 100
+    k_centroids = 25
     similarities, centroid_ids = centroid_index_gpu.search(query_vectors, k_centroids)
     
     centroid_to_shard, num_shards = get_centroid_to_shard_mapping()

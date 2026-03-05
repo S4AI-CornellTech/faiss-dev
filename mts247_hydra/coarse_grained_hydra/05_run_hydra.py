@@ -299,7 +299,7 @@ def main():
     # ==============================================================
     # Phase 4: Save Results to CSV
     # ==============================================================
-    output_file = "data/hydra_analysis.csv"
+    output_file = "../data/hydra_analysis.csv"
     results_df = pd.DataFrame(analysis_results)
     results_df.to_csv(output_file, index=False)
     
