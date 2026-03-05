@@ -18,7 +18,7 @@ BATCH_SIZE_LIST      = [1]          # list of batch sizes
 RETRIEVED_DOCS_LIST  = [5]             # list of top-k values
 INDEX_SIZE_LIST      = ["300m"]
 
-MAX_BATCHES     = 5        # measured batches (after warmup)
+MAX_BATCHES     = 25        # measured batches (after warmup)
 WARMUP_BATCHES  = 0           # unmeasured warmup batches
 
 # Automatically detect all available threads

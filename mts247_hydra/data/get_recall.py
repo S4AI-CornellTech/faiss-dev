@@ -248,7 +248,7 @@ def main() -> None:
 
     systems = [
         ("Monolithic", args.monolithic),
-        ("Hydra", args.hydra),
+        # ("Hydra", args.hydra),
         ("FineGrainedHydra", args.fine_grained_hydra),
     ]
 

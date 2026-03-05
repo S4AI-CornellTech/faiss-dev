@@ -27,7 +27,7 @@ QUERY_PATH = "../triviaqa_encodings.npy"
 CENTROID_LIST = "/data/indices/hydra/hydra_centroids.npy"
 CENTROID_LOOKUP = "/data/indices/hydra/centroid_to_shard_map.csv"
 
-NUM_QUERIES = 5
+NUM_QUERIES = 25
 
 NUM_DOCS = 5
 WARMUP_RUNS = 2
