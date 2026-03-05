@@ -284,12 +284,12 @@ def main():
         
         # Record results
         analysis_results.append({
-            'Query': q,
-            'ShardID': max_shard_id,
-            'GPU Transfer Time': gpu_transfer_time,
-            'GPU Search Time': gpu_search_time,
-            'Warmup Time': avg_warmup_time,
-            'TopDocs': ','.join(map(str, indices[0].tolist()))
+            'query': q,
+            'shard_id': max_shard_id,
+            'gpu_transfer_time': gpu_transfer_time,
+            'gpu_search_time': gpu_search_time,
+            'warmup_time': avg_warmup_time,
+            'best_retrieved_ids': str(indices[0].tolist())
         })
         
         del gpu_index

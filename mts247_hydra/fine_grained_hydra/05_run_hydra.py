@@ -327,14 +327,14 @@ def main():
         
         # Record results
         analysis_results.append({
-            'Query': q,
-            'SearchedShardIDs': str(hit_shard_ids),
-            'NumSearchedShards': len(hit_shard_ids),
-            'GPU Transfer Time': total_gpu_transfer_time,
-            'GPU Search Time': total_gpu_search_time,
-            'Warmup Time': avg_warmup_time,
-            'TopDocs': str(final_docs.tolist()),
-            'TopDocShards': str(final_doc_shards.tolist())
+            'query': q,
+            'searched_shard_ids': str(hit_shard_ids),
+            'num_searched_shards': len(hit_shard_ids),
+            'gpu_transfer_time': total_gpu_transfer_time,
+            'gpu_search_time': total_gpu_search_time,
+            'warmup_time': avg_warmup_time,
+            'best_retrieved_ids': str(final_docs.tolist()),
+            'top_doc_shards': str(final_doc_shards.tolist())
         })
     
     # ==============================================================

@@ -68,6 +68,25 @@ def read_csv(path: str) -> List[Dict[str, str]]:
         return list(reader)
 
 
+def detect_column(rows: List[Dict[str, str]], candidates: List[str], role: str, source_name: str) -> str:
+    if not rows:
+        raise ValueError(f"{source_name}: CSV has no rows, cannot detect {role} column")
+
+    columns = list(rows[0].keys())
+    lower_to_actual = {c.lower(): c for c in columns}
+
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+        if candidate.lower() in lower_to_actual:
+            return lower_to_actual[candidate.lower()]
+
+    raise ValueError(
+        f"{source_name}: could not detect {role} column. "
+        f"Tried {candidates}, found columns: {columns}"
+    )
+
+
 def build_row_map(rows: List[Dict[str, str]], query_col: str) -> Dict[str, Dict[str, str]]:
     mapped: Dict[str, Dict[str, str]] = {}
     for row in rows:
@@ -166,42 +185,72 @@ def write_per_query(path: str, rows: List[Dict[str, Any]]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compute recall by comparing ground-truth IDs vs Hydra TopDocs IDs per query."
+        description="Compute recall for monolithic baseline, hydra, and fine-grained hydra vs ground truth."
     )
-    parser.add_argument("--ground-truth", default="hydra_monolithic_ground_truth.csv", help="Path to *_ground_truth.csv")
-    # parser.add_argument("--hydra-analysis", default="hydra_analysis.csv", help="Path to *hydra_analysis.csv")
-    parser.add_argument("--hydra-analysis", default="fine_grained_hydra_analysis.csv", help="Path to *hydra_analysis.csv")
-    parser.add_argument("--query-column", default="query", help="Query key column used to join rows")
-    parser.add_argument("--gt-column", default="best_retrieved_ids", help="Ground truth ID-list column")
-    parser.add_argument("--hydra-column", default="TopDocs", help="Hydra predicted ID-list column")
-    parser.add_argument(
-        "--output-per-query",
-        default="",
-        help="Optional CSV path to save per-query recall details",
-    )
+    parser.add_argument("--ground-truth", default="hydra_monolithic_ground_truth.csv", help="Path to ground-truth CSV")
+    parser.add_argument("--monolithic", default="hydra_baseline_bs_1.csv", help="Path to monolithic baseline CSV")
+    parser.add_argument("--hydra", default="hydra_analysis.csv", help="Path to hydra CSV")
+    parser.add_argument("--fine-grained-hydra", default="fine_grained_hydra_analysis.csv", help="Path to fine-grained hydra CSV")
+    parser.add_argument("--output-per-query-prefix", default="", help="Optional prefix to save per-query CSVs (one per system)")
 
     args = parser.parse_args()
 
     gt_rows = read_csv(args.ground_truth)
-    hydra_rows = read_csv(args.hydra_analysis)
 
-    per_query, summary = compute_recall(
-        ground_truth_rows=gt_rows,
-        hydra_rows=hydra_rows,
-        query_col=args.query_column,
-        gt_col=args.gt_column,
-        hydra_col=args.hydra_column,
-    )
+    gt_query_col = detect_column(gt_rows, ["query", "Query"], "query", "ground_truth")
+    gt_ids_col = detect_column(gt_rows, ["best_retrieved_ids", "TopDocs", "top_docs"], "retrieved ids", "ground_truth")
 
-    print("Recall Summary")
-    print("==============")
-    print(f"Evaluated queries: {int(summary['evaluated_queries'])}")
-    print(f"Average recall:    {summary['avg_recall']:.6f}")
-    print(f"Hit rate:          {summary['hit_rate']:.6f}")
+    systems = [
+        ("Monolithic", args.monolithic),
+        ("Hydra", args.hydra),
+        ("FineGrainedHydra", args.fine_grained_hydra),
+    ]
 
-    if args.output_per_query:
-        write_per_query(args.output_per_query, per_query)
-        print(f"Saved per-query results to: {args.output_per_query}")
+    print("Recall Comparison")
+    print("=================")
+    print(f"Ground truth: {args.ground_truth} (query={gt_query_col}, ids={gt_ids_col})")
+
+    for system_name, system_path in systems:
+        system_rows = read_csv(system_path)
+        system_query_col = detect_column(system_rows, ["query", "Query"], "query", system_name)
+        system_ids_col = detect_column(
+            system_rows,
+            ["best_retrieved_ids", "top_docs", "TopDocs"],
+            "retrieved ids",
+            system_name,
+        )
+
+        per_query, summary = compute_recall(
+            ground_truth_rows=gt_rows,
+            hydra_rows=system_rows,
+            query_col=gt_query_col if gt_query_col == system_query_col else "query",
+            gt_col=gt_ids_col,
+            hydra_col=system_ids_col,
+        )
+
+        if gt_query_col != system_query_col:
+            gt_rows_norm = [{**r, "query": r.get(gt_query_col, "")} for r in gt_rows]
+            system_rows_norm = [{**r, "query": r.get(system_query_col, "")} for r in system_rows]
+            per_query, summary = compute_recall(
+                ground_truth_rows=gt_rows_norm,
+                hydra_rows=system_rows_norm,
+                query_col="query",
+                gt_col=gt_ids_col,
+                hydra_col=system_ids_col,
+            )
+
+        print(f"\n{system_name}:")
+        print(f"  File:              {system_path}")
+        print(f"  Query column:      {system_query_col}")
+        print(f"  Retrieved-id col:  {system_ids_col}")
+        print(f"  Evaluated queries: {int(summary['evaluated_queries'])}")
+        print(f"  Average recall:    {summary['avg_recall']:.6f}")
+        print(f"  Hit rate:          {summary['hit_rate']:.6f}")
+
+        if args.output_per_query_prefix:
+            output_path = f"{args.output_per_query_prefix}_{system_name.lower()}.csv"
+            write_per_query(output_path, per_query)
+            print(f"  Saved per-query:   {output_path}")
 
 
 if __name__ == "__main__":
