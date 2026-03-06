@@ -242,10 +242,10 @@ struct PinnedMmapRegistry {
         cudaError_t err = cudaMallocHost(
                 reinterpret_cast<void**>(&pinnedPtr), expectedSize);
         if (err != cudaSuccess) {
-            std::cerr << "[faiss] PinnedMmapRegistry: cudaMallocHost("
-                      << (expectedSize >> 20) << " MB) failed: "
-                      << cudaGetErrorString(err)
-                      << " — falling back to pageable DMA\n";
+            // std::cerr << "[faiss] PinnedMmapRegistry: cudaMallocHost("
+            //           << (expectedSize >> 20) << " MB) failed: "
+            //           << cudaGetErrorString(err)
+            //           << " — falling back to pageable DMA\n";
             return nullptr;
         }
 
@@ -254,8 +254,8 @@ struct PinnedMmapRegistry {
         // kernel can use large-page TLB entries and avoids double-buffering.
         MMapFile mapped = mapFileReadOnly(path);
         if (!mapped.data || mapped.size != expectedSize) {
-            std::cerr << "[faiss] PinnedMmapRegistry: failed to mmap "
-                      << path << "\n";
+            // std::cerr << "[faiss] PinnedMmapRegistry: failed to mmap "
+            //           << path << "\n";
             cudaFreeHost(pinnedPtr);
             if (mapped.data) unmapFile(mapped);
             return nullptr;
@@ -266,9 +266,9 @@ struct PinnedMmapRegistry {
         unmapFile(mapped);
 
         entries[path] = {pinnedPtr, expectedSize};
-        std::cerr << "[faiss] PinnedMmapRegistry: loaded "
-                  << (expectedSize >> 20) << " MB into pinned memory for "
-                  << path << "\n";
+        // std::cerr << "[faiss] PinnedMmapRegistry: loaded "
+        //           << (expectedSize >> 20) << " MB into pinned memory for "
+        //           << path << "\n";
         return pinnedPtr;
     }
 
@@ -804,12 +804,12 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
         t_meta = elapsedSec(t0, now());
     }
 
-    if (packedDebugEnv) {
-        std::cerr << "[faiss] packed_lists usePacked=" << usePacked
-                  << " metaLoaded=" << metaLoaded
-                  << " indicesOptions=" << static_cast<int>(indicesOptions_)
-                  << " nlist=" << nlist << "\n";
-    }
+    // if (packedDebugEnv) {
+        // std::cerr << "[faiss] packed_lists usePacked=" << usePacked
+        //           << " metaLoaded=" << metaLoaded
+        //           << " indicesOptions=" << static_cast<int>(indicesOptions_)
+        //           << " nlist=" << nlist << "\n";
+    // }
 
     {
         auto t0 = now();
@@ -887,10 +887,10 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
         }
         t_codes_cache = elapsedSec(t0, now());
 
-        if (packedDebugEnv) {
-            std::cerr << "[faiss] packed_lists codesCacheOk=" << codesCacheOk
-                      << " totalGpuBytes=" << totalGpuBytes << "\n";
-        }
+        // if (packedDebugEnv) {
+            // std::cerr << "[faiss] packed_lists codesCacheOk=" << codesCacheOk
+            //           << " totalGpuBytes=" << totalGpuBytes << "\n";
+        // }
 
         if (codesCacheOk && usePacked && metaLoaded) {
             // Reset state to avoid stale pointers/state across repeated loads.
@@ -951,10 +951,10 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                 }
                 t_indices_cache = elapsedSec(t0i, now());
 
-                if (packedDebugEnv) {
-                    std::cerr << "[faiss] packed_lists indicesCacheOk=" << indicesCacheOk
-                              << " totalIndexBytes=" << totalIndexBytes << "\n";
-                }
+                // if (packedDebugEnv) {
+                    // std::cerr << "[faiss] packed_lists indicesCacheOk=" << indicesCacheOk
+                    //           << " totalIndexBytes=" << totalIndexBytes << "\n";
+                // }
 
                 if (indicesCacheOk && totalIndexBytes > 0) {
                     auto t0ia = now();
@@ -1193,21 +1193,21 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
                     auto toGb = [](size_t bytes) {
                         return static_cast<double>(bytes) / (1024.0*1024.0*1024.0);
                     };
-                    if (totalGpuBytes > 0) {
-                        std::cerr << "[faiss] packed_lists codes read GB/s="
-                                  << (toGb(totalGpuBytes) / std::max(1e-9, codesReadSec))
-                                  << " copy GB/s="
-                                  << (toGb(totalGpuBytes) / std::max(1e-9, codesCopySec))
-                                  << "\n";
-                    }
-                    if (totalIndexBytes > 0) {
-                        std::cerr << "[faiss] packed_lists indices read GB/s="
-                                  << (toGb(totalIndexBytes) / std::max(1e-9, indicesReadSec))
-                                  << " copy GB/s="
-                                  << (toGb(totalIndexBytes) / std::max(1e-9, indicesCopySec))
-                                  << "\n";
-                    }
-                    std::cerr << "[faiss] packed_lists enabled; bulk upload complete\n";
+                    // if (totalGpuBytes > 0) {
+                    //     // std::cerr << "[faiss] packed_lists codes read GB/s="
+                    //     //           << (toGb(totalGpuBytes) / std::max(1e-9, codesReadSec))
+                    //     //           << " copy GB/s="
+                    //     //           << (toGb(totalGpuBytes) / std::max(1e-9, codesCopySec))
+                    //     //           << "\n";
+                    // }
+                    // if (totalIndexBytes > 0) {
+                    //     std::cerr << "[faiss] packed_lists indices read GB/s="
+                    //               << (toGb(totalIndexBytes) / std::max(1e-9, indicesReadSec))
+                    //               << " copy GB/s="
+                    //               << (toGb(totalIndexBytes) / std::max(1e-9, indicesCopySec))
+                    //               << "\n";
+                    // }
+                    // std::cerr << "[faiss] packed_lists enabled; bulk upload complete\n";
                 }
 
                 {

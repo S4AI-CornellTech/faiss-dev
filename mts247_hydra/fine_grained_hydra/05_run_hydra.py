@@ -29,7 +29,7 @@ CENTROID_LOOKUP = "/data/indices/hydra/fine/centroid_to_shard_map.csv"
 
 NUM_QUERIES = 500
 
-NUM_CENTROIDS = 10 # How many centroids we search and the number of corresponding shards created from it
+NUM_CENTROIDS = 25 # How many centroids we search and the number of corresponding shards created from it
 NUM_DOCS = 10
 WARMUP_RUNS = 2
 TRIALS = 100
@@ -284,7 +284,7 @@ def main():
 
             # Set nprobe to match baseline search breadth
             if hasattr(gpu_index, 'nprobe'):
-                gpu_index.nprobe = min(256, gpu_index.nlist)
+                gpu_index.nprobe = min(1024, gpu_index.nlist)
 
             t_search_start = time.perf_counter()
             distances, indices = gpu_index.search(query_vectors[q:q+1], NUM_DOCS)
