@@ -3,19 +3,14 @@ import argparse
 import ast
 import csv
 import math
-import re
 from typing import Dict, List, Tuple, Any
 
 
 def parse_ids(raw: Any) -> List[int]:
     """Parse an ID field into a list of ints.
 
-    Supports values like:
-    - "123"
-    - "[123, 456]"
-    - "123,456"
-    - "123|456"
-    - "123 456"
+    Expected/accepted format only:
+    - "[123, 456, 789]"
     """
     if raw is None:
         return []
@@ -49,17 +44,18 @@ def parse_ids(raw: Any) -> List[int]:
                 pass
         return out
 
-    if text.startswith("[") or text.startswith("("):
-        try:
-            parsed = ast.literal_eval(text)
-            if isinstance(parsed, (list, tuple)):
-                return to_int_list(list(parsed))
-            return to_int_list([parsed])
-        except Exception:
-            pass
+    if not (text.startswith("[") and text.endswith("]")):
+        return []
 
-    parts = re.split(r"[,|;\s]+", text)
-    return to_int_list(parts)
+    try:
+        parsed = ast.literal_eval(text)
+    except Exception:
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+
+    return to_int_list(parsed)
 
 
 def read_csv(path: str) -> List[Dict[str, str]]:
@@ -151,6 +147,7 @@ def compute_recall(
     query_col: str,
     gt_col: str,
     hydra_col: str,
+    compare_top_k: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     per_query: List[Dict[str, Any]] = []
 
@@ -164,6 +161,10 @@ def compute_recall(
         for q in shared_queries:
             gt_ids = parse_ids(gt_map[q].get(gt_col, ""))
             pred_ids = parse_ids(hydra_map[q].get(hydra_col, ""))
+
+            if compare_top_k > 0:
+                gt_ids = gt_ids[:compare_top_k]
+                pred_ids = pred_ids[:compare_top_k]
 
             gt_set = set(gt_ids)
             pred_set = set(pred_ids)
@@ -185,6 +186,10 @@ def compute_recall(
         for i in range(pair_count):
             gt_ids = parse_ids(ground_truth_rows[i].get(gt_col, ""))
             pred_ids = parse_ids(hydra_rows[i].get(hydra_col, ""))
+
+            if compare_top_k > 0:
+                gt_ids = gt_ids[:compare_top_k]
+                pred_ids = pred_ids[:compare_top_k]
 
             gt_set = set(gt_ids)
             pred_set = set(pred_ids)
@@ -238,6 +243,12 @@ def main() -> None:
     parser.add_argument("--hydra", default="hydra_analysis.csv", help="Path to hydra CSV")
     parser.add_argument("--fine-grained-hydra", default="fine_grained_hydra_analysis.csv", help="Path to fine-grained hydra CSV")
     parser.add_argument("--output-per-query-prefix", default="", help="Optional prefix to save per-query CSVs (one per system)")
+    parser.add_argument(
+        "--compare-top-k",
+        type=int,
+        default=0,
+        help="Only compare top-k docs from each retrieved-id list (0 means use full list)",
+    )
 
     args = parser.parse_args()
 
@@ -255,6 +266,8 @@ def main() -> None:
     print("Recall Comparison")
     print("=================")
     print(f"Ground truth: {args.ground_truth} (query={gt_query_col}, ids={gt_ids_col})")
+    compare_scope = f"top-{args.compare_top_k}" if args.compare_top_k > 0 else "full-list"
+    print(f"Comparison scope: {compare_scope}")
 
     for system_name, system_path in systems:
         system_rows = read_csv(system_path)
@@ -272,6 +285,7 @@ def main() -> None:
             query_col=gt_query_col if gt_query_col == system_query_col else "query",
             gt_col=gt_ids_col,
             hydra_col=system_ids_col,
+            compare_top_k=args.compare_top_k,
         )
 
         if gt_query_col != system_query_col:
@@ -283,6 +297,7 @@ def main() -> None:
                 query_col="query",
                 gt_col=gt_ids_col,
                 hydra_col=system_ids_col,
+                compare_top_k=args.compare_top_k,
             )
 
         if system_name == "Monolithic":

@@ -8,9 +8,9 @@ import csv
 # CONFIG
 # ==============================================================
 INDEX_PATH = "/data/indices/hydra/hydra_sphere_ivf_300m_sq8.faiss"
-OUTPUT_DIR = "/data/indices/hydra/shards/"
-MAPPING_FILE = "/data/indices/hydra/centroid_to_shard_map.csv"
-INDEX_SIZE = 10    # Number of original clusters per shard
+OUTPUT_DIR = "/data/indices/hydra/fine/shards/"
+MAPPING_FILE = "/data/indices/hydra/fine/centroid_to_shard_map.csv"
+INDEX_SIZE = 100    # Number of original clusters per shard
 # ==============================================================
 
 def extract_ivf_index(index):

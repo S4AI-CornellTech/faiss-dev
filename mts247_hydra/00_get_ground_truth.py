@@ -15,10 +15,10 @@ OUTPUT_FILE = f"data/hydra_monolithic_ground_truth.csv"
 # Lists of parameters to iterate through
 NPROBE_LIST          = [24494]         # list of nprobe values
 BATCH_SIZE_LIST      = [1]          # list of batch sizes
-RETRIEVED_DOCS_LIST  = [5]             # list of top-k values
+RETRIEVED_DOCS_LIST  = [10]             # list of top-k values
 INDEX_SIZE_LIST      = ["300m"]
 
-MAX_BATCHES     = 25        # measured batches (after warmup)
+MAX_BATCHES     = 500        # measured batches (after warmup)
 WARMUP_BATCHES  = 0           # unmeasured warmup batches
 
 # Automatically detect all available threads
@@ -50,6 +50,27 @@ def warmup(index, k, embeddings, batch_size, warmup_batches):
     for batch in _iterate_batches(embeddings, batch_size, warmup_batches):
         _ = index.search(batch, k)
 
+def get_resume_query_start(output_path):
+    if not os.path.exists(output_path):
+        return 0
+
+    max_query = -1
+    with open(output_path, mode="r", newline="") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames or "query" not in reader.fieldnames:
+            return 0
+
+        for row in reader:
+            query_value = row.get("query", "")
+            try:
+                query_idx = int(query_value)
+            except (TypeError, ValueError):
+                continue
+            if query_idx > max_query:
+                max_query = query_idx
+
+    return max_query + 1
+
 def measure(index, k, embeddings, batch_size, measure_batches, writer, output_file, run_meta):
     times = []
     for batch_idx, batch in enumerate(tqdm(
@@ -64,10 +85,10 @@ def measure(index, k, embeddings, batch_size, measure_batches, writer, output_fi
         search_time_s = end - start
         times.append(search_time_s)
 
-        batch_start_query = batch_idx * batch_size
+        batch_start_query = run_meta["start_query_idx"] + (batch_idx * batch_size)
         for row_idx_in_batch in range(len(indices)):
             query_idx = batch_start_query + row_idx_in_batch
-            top_5_ids = indices[row_idx_in_batch][:5].tolist() if len(indices[row_idx_in_batch]) > 0 else []
+            top_k_ids = indices[row_idx_in_batch][:k].tolist() if len(indices[row_idx_in_batch]) > 0 else []
 
             writer.writerow({
                 "query": query_idx,
@@ -77,7 +98,7 @@ def measure(index, k, embeddings, batch_size, measure_batches, writer, output_fi
                 "batch_size": run_meta["batch_size"],
                 "num_retrieved_docs": run_meta["num_retrieved_docs"],
                 "avg_query_time": search_time_s / max(1, len(batch)),
-                "best_retrieved_ids": str(top_5_ids)
+                "best_retrieved_ids": str(top_k_ids)
             })
 
         output_file.flush()  # persist to disk after each search() call
@@ -90,9 +111,18 @@ def measure(index, k, embeddings, batch_size, measure_batches, writer, output_fi
 def main():
     os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
 
+    start_query_idx = get_resume_query_start(OUTPUT_FILE)
+
     # Load queries once
     queries = np.load(QUERY_FILE).astype(np.float32)
     queries = np.ascontiguousarray(queries)
+
+    if start_query_idx >= len(queries):
+        print(f"[INFO] Output already has all queries (next={start_query_idx}, total={len(queries)}). Nothing to do.")
+        return
+
+    queries = queries[start_query_idx:]
+    print(f"[INFO] Resuming from query index {start_query_idx} ({len(queries)} queries remaining)")
 
     print(f"[INFO] Detected {NUM_THREADS} CPU threads")
     
@@ -101,9 +131,11 @@ def main():
 
     # Prepare CSV
     fieldnames = ["query", "index_size", "threads", "nprobe", "batch_size", "num_retrieved_docs", "avg_query_time", "best_retrieved_ids"]
-    with open(OUTPUT_FILE, mode="w", newline="") as f:
+    output_exists_and_has_data = os.path.exists(OUTPUT_FILE) and os.path.getsize(OUTPUT_FILE) > 0
+    with open(OUTPUT_FILE, mode="a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
+        if not output_exists_and_has_data:
+            writer.writeheader()
 
         # Calculate total iterations for progress tracking
         total_iterations = len(NPROBE_LIST) * len(BATCH_SIZE_LIST) * len(RETRIEVED_DOCS_LIST)
@@ -144,6 +176,7 @@ def main():
                                 "nprobe": nprobe,
                                 "batch_size": batch_size,
                                 "num_retrieved_docs": retrieved_docs,
+                                "start_query_idx": start_query_idx,
                             },
                         )
                         

@@ -21,11 +21,11 @@ except ImportError:
 # ==============================================================
 # Config
 # ==============================================================
-SHARDS_DIR = "/data/indices/hydra/shards"
+SHARDS_DIR = "/data/indices/hydra/coarse/shards"
 SHARD_GLOB = "hydra_head_*.faiss"
 QUERY_PATH = "triviaqa_encodings.npy"
 CENTROID_LIST = "/data/indices/hydra/hydra_centroids.npy"
-CENTROID_LOOKUP = "/data/indices/hydra/centroid_to_shard_map.csv"
+CENTROID_LOOKUP = "/data/indices/hydra/coarse/centroid_to_shard_map.csv"
 
 NUM_QUERIES=5
 
@@ -57,7 +57,7 @@ def get_gpu_resources():
     return res
 
 def clear_cache():
-    cache_path = "/data/indices/hydra/hydra_cache_shards"
+    cache_path = "/data/indices/hydra/coarse/hydra_cache_shards"
     if os.path.exists(cache_path):
         for filename in os.listdir(cache_path):
             file_path = os.path.join(cache_path, filename)
@@ -132,7 +132,7 @@ def warmup_shards(persistent_res, cpu_indices, num_warmup_runs, hydra_shards):
         
         for shard_idx in shard_order:
             os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
-                f"/data/indices/hydra/hydra_cache_shards/hydra_shard_{shard_idx}"
+                f"/data/indices/hydra/coarse/hydra_cache_shards/hydra_shard_{shard_idx}"
             )
             
             t_start = time.perf_counter()
@@ -262,7 +262,7 @@ def main():
         
         # Load selected shard and retrieve documents
         os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
-            f"/data/indices/hydra/hydra_cache_shards/hydra_shard_{max_shard_id}"
+            f"/data/indices/hydra/coarse/hydra_cache_shards/hydra_shard_{max_shard_id}"
         )
         
         t_transfer_start = time.perf_counter()

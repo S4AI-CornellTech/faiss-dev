@@ -21,15 +21,16 @@ except ImportError:
 # ==============================================================
 # Config
 # ==============================================================
-SHARDS_DIR = "/data/indices/hydra/shards"
+SHARDS_DIR = "/data/indices/hydra/fine/shards"
 SHARD_GLOB = "hydra_head_*.faiss"
 QUERY_PATH = "../triviaqa_encodings.npy"
 CENTROID_LIST = "/data/indices/hydra/hydra_centroids.npy"
-CENTROID_LOOKUP = "/data/indices/hydra/centroid_to_shard_map.csv"
+CENTROID_LOOKUP = "/data/indices/hydra/fine/centroid_to_shard_map.csv"
 
-NUM_QUERIES = 25
+NUM_QUERIES = 500
 
-NUM_DOCS = 5
+NUM_CENTROIDS = 10 # How many centroids we search and the number of corresponding shards created from it
+NUM_DOCS = 10
 WARMUP_RUNS = 2
 TRIALS = 100
 USE_UNIFIED_MEMORY = False
@@ -57,7 +58,7 @@ def get_gpu_resources():
     return res
 
 def clear_cache():
-    cache_path = "/data/indices/hydra/hydra_cache_shards"
+    cache_path = "/data/indices/hydra/fine/hydra_cache_shards"
     if os.path.exists(cache_path):
         for filename in os.listdir(cache_path):
             file_path = os.path.join(cache_path, filename)
@@ -132,7 +133,7 @@ def warmup_shards(persistent_res, cpu_indices, num_warmup_runs, hydra_shards):
         
         for shard_idx in shard_order:
             os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
-                f"/data/indices/hydra/hydra_cache_shards/hydra_shard_{shard_idx}"
+                f"/data/indices/hydra/fine/hydra_cache_shards/hydra_shard_{shard_idx}"
             )
             
             t_start = time.perf_counter()
@@ -238,8 +239,7 @@ def main():
     centroid_index_gpu.add(centroids)
     
     # Search top centroids
-    k_centroids = 25
-    similarities, centroid_ids = centroid_index_gpu.search(query_vectors, k_centroids)
+    similarities, centroid_ids = centroid_index_gpu.search(query_vectors, NUM_CENTROIDS)
     
     centroid_to_shard, num_shards = get_centroid_to_shard_mapping()
     retrieved_ids_gpu = torch.tensor(centroid_ids, device="cuda", dtype=torch.long)
@@ -249,7 +249,7 @@ def main():
     # Phase 3: Per-Query Shard Analysis & Retrieval
     # ==============================================================
     print("\n" + "="*60)
-    print(f"Per-Query Analysis (top-{k_centroids} centroids)")
+    print(f"Per-Query Analysis (top-{NUM_CENTROIDS} centroids)")
     print("="*60)
     
     analysis_results = []
@@ -257,9 +257,9 @@ def main():
     for q in range(len(query_vectors)):
         # Analyze shard hits
         hit_shard_ids, shard_counts_cpu = analyze_shard_hits_per_query(
-            q, k_centroids, centroid_ids, retrieved_shards, num_shards
+            q, NUM_CENTROIDS, centroid_ids, retrieved_shards, num_shards
         )
-        # print_shard_analysis(q, k_centroids, centroid_ids, hit_shard_ids, shard_counts_cpu, hydra_shards)
+        # print_shard_analysis(q, NUM_CENTROIDS, centroid_ids, hit_shard_ids, shard_counts_cpu, hydra_shards)
 
         if not hit_shard_ids:
             print("\n  No valid shard hits found; skipping query.")
@@ -273,7 +273,7 @@ def main():
 
         for shard_id in hit_shard_ids:
             os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = (
-                f"/data/indices/hydra/hydra_cache_shards/hydra_shard_{shard_id}"
+                f"/data/indices/hydra/fine/hydra_cache_shards/hydra_shard_{shard_id}"
             )
 
             t_transfer_start = time.perf_counter()

@@ -10,10 +10,10 @@ import re
 # ==============================================================
 # Config
 # ==============================================================
-SHARDS_DIR = "/data/indices/hydra/shards"
+SHARDS_DIR = "/data/indices/hydra/fine/shards"
 SHARD_GLOB = "hydra_head_*.faiss"
 
-OUTPUT_DIR = "/data/indices/hydra/hydra_cache_shards"
+OUTPUT_DIR = "/data/indices/hydra/fine/hydra_cache_shards"
 PINNED_MEM_BYTES = 2 * 1024 * 1024 * 1024
 
 
@@ -30,7 +30,7 @@ def discover_shards(shards_dir, shard_glob):
     return shard_paths
 
 def clear_cache():
-    cache_path = "/data/indices/hydra/hydra_cache_shards"
+    cache_path = "/data/indices/hydra/fine/hydra_cache_shards"
     if os.path.exists(cache_path):
         for filename in os.listdir(cache_path):
             file_path = os.path.join(cache_path, filename)
