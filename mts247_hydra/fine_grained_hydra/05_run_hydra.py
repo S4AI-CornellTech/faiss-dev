@@ -284,7 +284,7 @@ def main():
 
             # Set nprobe to match baseline search breadth
             if hasattr(gpu_index, 'nprobe'):
-                gpu_index.nprobe = min(1024, gpu_index.nlist)
+                gpu_index.nprobe = min(2048, gpu_index.nlist)
 
             t_search_start = time.perf_counter()
             distances, indices = gpu_index.search(query_vectors[q:q+1], NUM_DOCS)
