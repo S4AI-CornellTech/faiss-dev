@@ -31,7 +31,7 @@ def main():
     parser.add_argument(
         "--index",
         type=str,
-        default="/data/indices/hydra/hydra_sphere_ivf_300m_sq8.faiss",
+        default="/data/indices/hydra/hydra_sphere_ivf_600m_sq8.faiss",
         help="Path to FAISS index file",
     )
     parser.add_argument(

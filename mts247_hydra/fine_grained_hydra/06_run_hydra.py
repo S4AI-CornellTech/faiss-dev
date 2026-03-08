@@ -163,7 +163,6 @@ def load_shard_to_gpu(persistent_res: faiss.GpuResources,
         nlist           = meta.nlist,
         cache_dir       = meta.cache_dir,
         cloner_options  = get_gpu_cloner_options(),
-        indices_options = faiss.INDICES_32_BIT,
     )
 
 

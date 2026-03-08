@@ -16,7 +16,7 @@ OUTPUT_FILE = f"data/hydra_baseline_bs_1.csv"
 NPROBE_LIST          = [256]         # list of nprobe values
 BATCH_SIZE_LIST      = [1]          # list of batch sizes
 RETRIEVED_DOCS_LIST  = [10]             # list of top-k values
-INDEX_SIZE_LIST      = ["300m"]
+INDEX_SIZE_LIST      = ["600m"]
 
 MAX_BATCHES     = 500        # measured batches (after warmup)
 WARMUP_BATCHES  = 0           # unmeasured warmup batches

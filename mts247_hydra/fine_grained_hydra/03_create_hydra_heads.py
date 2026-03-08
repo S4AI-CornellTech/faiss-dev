@@ -7,7 +7,7 @@ import csv
 # ==============================================================
 # CONFIG
 # ==============================================================
-INDEX_PATH = "/data/indices/hydra/hydra_sphere_ivf_300m_sq8.faiss"
+INDEX_PATH = "/data/indices/hydra/hydra_sphere_ivf_600m_sq8.faiss"
 OUTPUT_DIR = "/data/indices/hydra/fine/shards/"
 MAPPING_FILE = "/data/indices/hydra/fine/centroid_to_shard_map.csv"
 INDEX_SIZE = 100    # Number of original clusters per shard

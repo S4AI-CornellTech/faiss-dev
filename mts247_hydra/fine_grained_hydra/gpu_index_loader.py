@@ -15,11 +15,11 @@ object's code/id data, those pages are never faulted in — the inverted-list
 data costs zero RAM.
 
 Pages that ARE read:
-  • Index header / metadata  (a few KB)
-  • Coarse quantizer centroids  (~nlist * d * 4 bytes, already tiny)
+  * Index header / metadata  (a few KB)
+  * Coarse quantizer centroids  (~nlist * d * 4 bytes, already tiny)
 
 If the cache is cold (first ever run), the slow path fires and will read the
-mmap'd pages to build the cache — but only once.  All subsequent runs are
+mmap'd pages to build the cache -- but only once.  All subsequent runs are
 cache hits at zero RAM cost.
 """
 
@@ -38,11 +38,18 @@ _HEADER_FMT  = "<QQQQQQ"            # 6 x uint64_t  (little-endian)
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 
 
-def _read_meta(meta_path: str, expected_nlist: int, indices_options: int):
+def _read_meta(meta_path: str, expected_nlist: int):
     """
     Parse the binary .meta file written by IVFBase::writePackedMeta().
 
-    Returns (list_sizes, code_offsets, index_offsets, total_gpu_bytes, total_idx_bytes).
+    Returns
+    -------
+    list_sizes      : np.ndarray  shape (nlist,)  dtype int64
+    code_offsets    : np.ndarray  shape (nlist,)  dtype int64
+    index_offsets   : np.ndarray  shape (nlist,)  dtype int64
+    total_gpu_bytes : int
+    total_idx_bytes : int
+    indices_options : int  (read from file -- do not assume it matches your cloner)
     """
     with open(meta_path, "rb") as f:
         raw = f.read(_HEADER_SIZE)
@@ -55,8 +62,6 @@ def _read_meta(meta_path: str, expected_nlist: int, indices_options: int):
         raise ValueError(f"Unsupported version {version} in {meta_path}")
     if nlist != expected_nlist:
         raise ValueError(f"nlist mismatch: meta has {nlist}, expected {expected_nlist}")
-    if idx_opts != indices_options:
-        raise ValueError(f"indicesOptions mismatch: meta has {idx_opts}, expected {indices_options}")
 
     array_bytes = int(nlist) * 8
     with open(meta_path, "rb") as f:
@@ -65,7 +70,7 @@ def _read_meta(meta_path: str, expected_nlist: int, indices_options: int):
         code_offsets  = np.frombuffer(f.read(array_bytes), dtype=np.uint64).astype(np.int64)
         index_offsets = np.frombuffer(f.read(array_bytes), dtype=np.uint64).astype(np.int64)
 
-    return list_sizes, code_offsets, index_offsets, int(total_gpu), int(total_idx)
+    return list_sizes, code_offsets, index_offsets, int(total_gpu), int(total_idx), int(idx_opts)
 
 
 def _verify_cache_files(cache_dir: str, total_gpu_bytes: int) -> None:
@@ -84,19 +89,22 @@ def _verify_cache_files(cache_dir: str, total_gpu_bytes: int) -> None:
 
 
 def load_ivf_gpu_index_from_cache(
-    res:             faiss.GpuResources,
-    gpu_id:          int,
-    shard_path:      str,
-    nlist:           int,
-    cache_dir:       str = "/dev/shm",
-    cloner_options:  faiss.GpuClonerOptions = None,
-    indices_options: int = faiss.INDICES_32_BIT,
+    res:            faiss.GpuResources,
+    gpu_id:         int,
+    shard_path:     str,
+    nlist:          int,
+    cache_dir:      str = "/dev/shm",
+    cloner_options: faiss.GpuClonerOptions = None,
 ) -> faiss.GpuIndexIVF:
     """
     Build a GPU IVF index from the packed disk cache.
 
     The shard .faiss file is opened with IO_FLAG_MMAP so its inverted-list
     pages are never faulted into RAM on the cache-hit fast path.
+
+    The indices_options value is read directly from the .meta file so it
+    always matches what the cache was written with, regardless of what the
+    cloner_options specify.
 
     Parameters
     ----------
@@ -107,7 +115,6 @@ def load_ivf_gpu_index_from_cache(
     cache_dir       : directory containing gpu_codes_all.{bin,meta}
                       (must match FAISS_GPU_PACKED_CACHE_PATH)
     cloner_options  : GpuClonerOptions; sensible defaults used if None
-    indices_options : must match the value used when the cache was written
 
     Returns
     -------
@@ -118,35 +125,41 @@ def load_ivf_gpu_index_from_cache(
     os.environ["FAISS_GPU_PACKED_CACHE_PATH"] = cache_dir
 
     # ------------------------------------------------------------------
-    # 1. Validate the cache exists and is the right size.
+    # 1. Read the meta file — indices_options comes FROM the file, not
+    #    from the caller, so it always matches what was cached.
     # ------------------------------------------------------------------
     meta_path = os.path.join(cache_dir, "gpu_codes_all.meta")
     if not os.path.exists(meta_path):
         raise RuntimeError(
             f"Meta file not found: {meta_path}. "
-            "The packed cache has not been written yet — run a warmup first."
+            "The packed cache has not been written yet -- run a warmup first."
         )
 
-    _, _, _, total_gpu_bytes, _ = _read_meta(meta_path, nlist, indices_options)
+    _, _, _, total_gpu_bytes, _, cached_indices_options = _read_meta(meta_path, nlist)
     _verify_cache_files(cache_dir, total_gpu_bytes)
 
     # ------------------------------------------------------------------
-    # 2. mmap the shard — header + quantizer pages are read, inverted-list
+    # 2. Build cloner options, forcing indicesOptions to match the cache.
+    # ------------------------------------------------------------------
+    if cloner_options is None:
+        cloner_options = faiss.GpuClonerOptions()
+    # Override whatever was passed -- must match the cached value or the
+    # C++ meta validation will fail and fall through to the slow path.
+    cloner_options.indicesOptions = cached_indices_options
+
+    # ------------------------------------------------------------------
+    # 3. mmap the shard -- header + quantizer pages are read, inverted-list
     #    pages are never touched on the cache-hit path.
     # ------------------------------------------------------------------
     cpu_index = faiss.read_index(shard_path, faiss.IO_FLAG_MMAP)
 
     # ------------------------------------------------------------------
-    # 3. Transfer to GPU — hits the packed-cache fast path, uploads from
+    # 4. Transfer to GPU -- hits the packed-cache fast path, uploads from
     #    disk cache, never reads the mmap'd inverted-list pages.
     # ------------------------------------------------------------------
-    if cloner_options is None:
-        cloner_options = faiss.GpuClonerOptions()
-        cloner_options.indicesOptions = indices_options
-
     gpu_index = faiss.index_cpu_to_gpu(res, gpu_id, cpu_index, cloner_options)
 
-    # Release the mmap immediately — GPU index is fully self-contained.
+    # Release the mmap immediately -- GPU index is fully self-contained.
     del cpu_index
     return gpu_index
 
