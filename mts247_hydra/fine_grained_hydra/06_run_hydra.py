@@ -54,15 +54,11 @@ QUANTIZER_DIR   = "/data/indices/hydra/fine/coarse_quantizers"
 CACHE_ROOT      = "/data/indices/hydra/fine/hydra_cache_shards"
 
 NUM_QUERIES     = 500
-NUM_CENTROIDS   = 25
+NUM_CENTROIDS   = 40
 NUM_DOCS        = 10
 WARMUP_RUNS     = 2
-TRIALS          = 100
 USE_UNIFIED_MEMORY = False
 PINNED_MEM_BYTES   = 2 * 1024 * 1024 * 1024
-TEMP_MEM_BYTES     = 0
-REUSE_RESOURCES    = True
-
 
 # ==============================================================
 # Shard metadata  (replaces cpu_indices[i].nlist / .d / .metric_type)
