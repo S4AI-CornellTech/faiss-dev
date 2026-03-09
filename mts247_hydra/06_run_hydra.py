@@ -68,7 +68,7 @@ USE_UNIFIED_MEMORY   = False
 PINNED_MEM_BYTES     = 2 * 1024 * 1024 * 1024
 
 # Output folder for per-sweep CSVs
-OUTPUT_DIR = "../data/fine_grained_hydra_analysis"
+OUTPUT_DIR = "data/fine_grained_hydra_analysis"
 
 # ==============================================================
 # Shard metadata  (replaces cpu_indices[i].nlist / .d / .metric_type)
