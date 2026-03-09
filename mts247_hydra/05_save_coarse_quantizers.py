@@ -20,9 +20,9 @@ import re
 import time
 import faiss
 
-SHARDS_DIR   = "/data/indices/hydra/fine/shards"
+SHARDS_DIR   = "/data/indices/hydra/shards"
 SHARD_GLOB   = "hydra_head_*.faiss"
-QUANTIZER_DIR = "/data/indices/hydra/fine/coarse_quantizers"
+QUANTIZER_DIR = "/data/indices/hydra/coarse_quantizers"
 
 
 def discover_shards(shards_dir, shard_glob):

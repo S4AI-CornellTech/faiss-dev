@@ -10,14 +10,8 @@ from typing import Dict, List, Tuple, Any
 
 
 def parse_ids(raw: Any) -> List[int]:
-    """Parse an ID field into a list of ints.
-
-    Expected/accepted format only:
-    - "[123, 456, 789]"
-    """
     if raw is None:
         return []
-
     text = str(raw).strip()
     if text == "" or text.lower() in {"nan", "none", "null"}:
         return []
@@ -37,7 +31,6 @@ def parse_ids(raw: Any) -> List[int]:
                     continue
                 out.append(int(value))
                 continue
-
             s = str(value).strip()
             if not s:
                 continue
@@ -49,15 +42,12 @@ def parse_ids(raw: Any) -> List[int]:
 
     if not (text.startswith("[") and text.endswith("]")):
         return []
-
     try:
         parsed = ast.literal_eval(text)
     except Exception:
         return []
-
     if not isinstance(parsed, list):
         return []
-
     return to_int_list(parsed)
 
 
@@ -70,16 +60,13 @@ def read_csv(path: str) -> List[Dict[str, str]]:
 def detect_column(rows: List[Dict[str, str]], candidates: List[str], role: str, source_name: str) -> str:
     if not rows:
         raise ValueError(f"{source_name}: CSV has no rows, cannot detect {role} column")
-
     columns = list(rows[0].keys())
     lower_to_actual = {c.lower(): c for c in columns}
-
     for candidate in candidates:
         if candidate in columns:
             return candidate
         if candidate.lower() in lower_to_actual:
             return lower_to_actual[candidate.lower()]
-
     raise ValueError(
         f"{source_name}: could not detect {role} column. "
         f"Tried {candidates}, found columns: {columns}"
@@ -119,7 +106,6 @@ def average_latency_hydra(rows: List[Dict[str, str]], source_name: str) -> Tuple
         "gpu search time",
         source_name,
     )
-
     latencies: List[float] = []
     for row in rows:
         t_transfer = parse_float(row.get(transfer_col, ""))
@@ -127,7 +113,6 @@ def average_latency_hydra(rows: List[Dict[str, str]], source_name: str) -> Tuple
         if math.isnan(t_transfer) or math.isnan(t_search):
             continue
         latencies.append(t_transfer + t_search)
-
     avg = (sum(latencies) / len(latencies)) if latencies else 0.0
     return avg, transfer_col, search_col
 
@@ -153,10 +138,8 @@ def compute_recall(
     compare_top_k: int = 0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     per_query: List[Dict[str, Any]] = []
-
     gt_map = build_row_map(ground_truth_rows, query_col)
     hydra_map = build_row_map(hydra_rows, query_col)
-
     use_query_join = len(gt_map) > 0 and len(hydra_map) > 0
 
     if use_query_join:
@@ -164,56 +147,45 @@ def compute_recall(
         for q in shared_queries:
             gt_ids = parse_ids(gt_map[q].get(gt_col, ""))
             pred_ids = parse_ids(hydra_map[q].get(hydra_col, ""))
-
             if compare_top_k > 0:
                 gt_ids = gt_ids[:compare_top_k]
                 pred_ids = pred_ids[:compare_top_k]
-
             gt_set = set(gt_ids)
             pred_set = set(pred_ids)
             recall = (len(gt_set & pred_set) / len(gt_set)) if gt_set else 0.0
             hit = 1 if len(gt_set & pred_set) > 0 else 0
-
-            per_query.append(
-                {
-                    "query": q,
-                    "ground_truth_count": len(gt_set),
-                    "predicted_count": len(pred_set),
-                    "intersection_count": len(gt_set & pred_set),
-                    "recall": recall,
-                    "hit": hit,
-                }
-            )
+            per_query.append({
+                "query": q,
+                "ground_truth_count": len(gt_set),
+                "predicted_count": len(pred_set),
+                "intersection_count": len(gt_set & pred_set),
+                "recall": recall,
+                "hit": hit,
+            })
     else:
         pair_count = min(len(ground_truth_rows), len(hydra_rows))
         for i in range(pair_count):
             gt_ids = parse_ids(ground_truth_rows[i].get(gt_col, ""))
             pred_ids = parse_ids(hydra_rows[i].get(hydra_col, ""))
-
             if compare_top_k > 0:
                 gt_ids = gt_ids[:compare_top_k]
                 pred_ids = pred_ids[:compare_top_k]
-
             gt_set = set(gt_ids)
             pred_set = set(pred_ids)
             recall = (len(gt_set & pred_set) / len(gt_set)) if gt_set else 0.0
             hit = 1 if len(gt_set & pred_set) > 0 else 0
-
-            per_query.append(
-                {
-                    "query": str(i),
-                    "ground_truth_count": len(gt_set),
-                    "predicted_count": len(pred_set),
-                    "intersection_count": len(gt_set & pred_set),
-                    "recall": recall,
-                    "hit": hit,
-                }
-            )
+            per_query.append({
+                "query": str(i),
+                "ground_truth_count": len(gt_set),
+                "predicted_count": len(pred_set),
+                "intersection_count": len(gt_set & pred_set),
+                "recall": recall,
+                "hit": hit,
+            })
 
     evaluated = len(per_query)
     avg_recall = sum(x["recall"] for x in per_query) / evaluated if evaluated else 0.0
     hit_rate = sum(x["hit"] for x in per_query) / evaluated if evaluated else 0.0
-
     summary = {
         "evaluated_queries": float(evaluated),
         "avg_recall": avg_recall,
@@ -223,14 +195,7 @@ def compute_recall(
 
 
 def write_per_query(path: str, rows: List[Dict[str, Any]]) -> None:
-    fieldnames = [
-        "query",
-        "ground_truth_count",
-        "predicted_count",
-        "intersection_count",
-        "recall",
-        "hit",
-    ]
+    fieldnames = ["query", "ground_truth_count", "predicted_count", "intersection_count", "recall", "hit"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -238,10 +203,6 @@ def write_per_query(path: str, rows: List[Dict[str, Any]]) -> None:
 
 
 def discover_fine_grained_files(directory: str) -> List[Tuple[int, str]]:
-    """
-    Scan *directory* for files matching hydra_analysis_centroids_<N>.csv.
-    Returns a list of (num_centroids, filepath) sorted by num_centroids ascending.
-    """
     pattern = os.path.join(directory, "hydra_analysis_centroids_*.csv")
     found: List[Tuple[int, str]] = []
     for path in glob.glob(pattern):
@@ -262,17 +223,10 @@ def evaluate_system(
     output_prefix: str,
     is_monolithic: bool = False,
 ) -> Dict[str, Any]:
-    """Load, evaluate, and print results for a single system CSV. Returns summary dict."""
     system_rows = read_csv(system_path)
     system_query_col = detect_column(system_rows, ["query"], "query", system_name)
-    system_ids_col = detect_column(
-        system_rows,
-        ["best_retrieved_ids"],
-        "retrieved ids",
-        system_name,
-    )
+    system_ids_col = detect_column(system_rows, ["best_retrieved_ids"], "retrieved ids", system_name)
 
-    # Normalise query column name if it differs between files
     if gt_query_col != system_query_col:
         gt_rows_norm = [{**r, "query": r.get(gt_query_col, "")} for r in gt_rows]
         system_rows_norm = [{**r, "query": r.get(system_query_col, "")} for r in system_rows]
@@ -295,25 +249,13 @@ def evaluate_system(
         )
 
     if is_monolithic:
-        avg_latency, latency_col = average_latency_monolithic(system_rows, system_name)
-        latency_desc = f"avg({latency_col})"
+        avg_latency, _ = average_latency_monolithic(system_rows, system_name)
     else:
-        avg_latency, transfer_col, search_col = average_latency_hydra(system_rows, system_name)
-        latency_desc = f"avg({transfer_col} + {search_col})"
-
-    print(f"\n{system_name}:")
-    print(f"  File:              {system_path}")
-    print(f"  Query column:      {system_query_col}")
-    print(f"  Retrieved-id col:  {system_ids_col}")
-    print(f"  Avg latency (s):   {avg_latency:.6f} [{latency_desc}]")
-    print(f"  Evaluated queries: {int(summary['evaluated_queries'])}")
-    print(f"  Average recall:    {summary['avg_recall']:.6f}")
-    print(f"  Hit rate:          {summary['hit_rate']:.6f}")
+        avg_latency, _, _ = average_latency_hydra(system_rows, system_name)
 
     if output_prefix:
         output_path = f"{output_prefix}_{system_name.lower()}.csv"
         write_per_query(output_path, per_query)
-        print(f"  Saved per-query:   {output_path}")
 
     return {
         "system": system_name,
@@ -330,7 +272,7 @@ def main() -> None:
     parser.add_argument("--monolithic", default="hydra_baseline_bs_1.csv")
     parser.add_argument(
         "--fine-grained-hydra-dir",
-        default="fine_grained_hydra_analysis",
+        default="hydra_analysis/100_nlist_indices",
         help="Directory containing hydra_analysis_centroids_<N>.csv files",
     )
     parser.add_argument("--output-per-query-prefix", default="")
@@ -348,21 +290,10 @@ def main() -> None:
 
     compare_scope = f"top-{args.compare_top_k}" if args.compare_top_k > 0 else "full-list"
 
-    print("Recall Comparison")
-    print("=================")
-    print(f"Ground truth: {args.ground_truth} (query={gt_query_col}, ids={gt_ids_col})")
-    print(f"Comparison scope: {compare_scope}")
-
     sweep_files = discover_fine_grained_files(args.fine_grained_hydra_dir)
-    if not sweep_files:
-        print(f"\nWarning: no hydra_analysis_centroids_*.csv files found in '{args.fine_grained_hydra_dir}'")
-    else:
-        print(f"\nDetected {len(sweep_files)} fine-grained sweep file(s) in '{args.fine_grained_hydra_dir}':")
-        for nc, fp in sweep_files:
-            print(f"  num_centroids={nc:>4d}  →  {fp}")
 
     # --- Monolithic baseline ---
-    evaluate_system(
+    mono_result = evaluate_system(
         system_name="Monolithic",
         system_path=args.monolithic,
         gt_rows=gt_rows,
@@ -389,11 +320,30 @@ def main() -> None:
         result["num_centroids"] = num_centroids
         sweep_summaries.append(result)
 
+    # --- Monolithic summary table ---
+    print("Recall Comparison")
+    print("=================")
+    print(f"Ground truth: {args.ground_truth} (query={gt_query_col}, ids={gt_ids_col})")
+    print(f"Comparison scope: {compare_scope}")
+    print()
+    print("Monolithic Baseline")
+    print("-" * 55)
+    print(f"  {'system':<20}  {'avg_latency_s':>14}  {'avg_recall':>11}  {'hit_rate':>9}  {'queries':>8}")
+    print(f"  {'-'*20}  {'-'*14}  {'-'*11}  {'-'*9}  {'-'*8}")
+    print(
+        f"  {mono_result['system']:<20}  "
+        f"{mono_result['avg_latency']:>14.6f}  "
+        f"{mono_result['avg_recall']:>11.6f}  "
+        f"{mono_result['hit_rate']:>9.6f}  "
+        f"{int(mono_result['evaluated_queries']):>8d}"
+    )
+
     # --- Sweep summary table ---
     if sweep_summaries:
-        print("\n" + "="*70)
+        print()
+        print("=" * 70)
         print("Fine-Grained Hydra Sweep Summary")
-        print("="*70)
+        print("=" * 70)
         print(f"  {'num_centroids':>14}  {'avg_latency_s':>14}  {'avg_recall':>11}  {'hit_rate':>9}  {'queries':>8}")
         print(f"  {'-'*14}  {'-'*14}  {'-'*11}  {'-'*9}  {'-'*8}")
         for s in sweep_summaries:
@@ -404,7 +354,9 @@ def main() -> None:
                 f"{s['hit_rate']:>9.6f}  "
                 f"{int(s['evaluated_queries']):>8d}"
             )
-        print("="*70)
+        print("=" * 70)
+    elif not sweep_files:
+        print(f"\nWarning: no hydra_analysis_centroids_*.csv files found in '{args.fine_grained_hydra_dir}'")
 
 
 if __name__ == "__main__":

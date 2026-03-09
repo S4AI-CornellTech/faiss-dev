@@ -30,6 +30,7 @@ import time
 import gc
 import glob
 import re
+import argparse
 import torch
 import numpy as np
 import faiss
@@ -47,28 +48,21 @@ from gpu_index_loader import load_ivf_gpu_index_from_cache, _read_meta
 # ==============================================================
 # Config
 # ==============================================================
-SHARDS_DIR      = "/data/indices/hydra/fine/shards"
+SHARDS_DIR      = "/data/indices/hydra/shards"
 SHARD_GLOB      = "hydra_head_*.faiss"
 QUERY_PATH      = "../triviaqa_encodings.npy"
 CENTROID_LIST   = "/data/indices/hydra/hydra_centroids.npy"
-CENTROID_LOOKUP = "/data/indices/hydra/fine/centroid_to_shard_map.csv"
+CENTROID_LOOKUP = "/data/indices/hydra/centroid_to_shard_map.csv"
 
 # Directory produced by save_coarse_quantizers.py
-QUANTIZER_DIR   = "/data/indices/hydra/fine/coarse_quantizers"
+QUANTIZER_DIR   = "/data/indices/hydra/coarse_quantizers"
 
 # Packed cache root — one sub-dir per shard
-CACHE_ROOT      = "/data/indices/hydra/fine/hydra_cache_shards"
+CACHE_ROOT      = "/data/indices/hydra/hydra_cache_shards"
 
-NUM_QUERIES          = 1000
-NUM_CENTROIDS_SWEEP  = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100] 
-NUM_CENTROIDS_SWEEP  = [80, 90, 100]
-NUM_DOCS             = 10
 WARMUP_RUNS          = 2
 USE_UNIFIED_MEMORY   = False
 PINNED_MEM_BYTES     = 2 * 1024 * 1024 * 1024
-
-# Output folder for per-sweep CSVs
-OUTPUT_DIR = "data/fine_grained_hydra_analysis"
 
 # ==============================================================
 # Shard metadata  (replaces cpu_indices[i].nlist / .d / .metric_type)
@@ -244,7 +238,7 @@ def analyze_shard_hits_per_query(query_idx, centroid_ids,
 # ==============================================================
 def run_sweep(num_centroids, query_vectors, centroids, centroid_index_gpu,
               centroid_to_shard, num_shards, shard_metas, hydra_shards,
-              warmup_times, persistent_res):
+              warmup_times, persistent_res, num_docs):
     """Run the full per-query retrieval for a single num_centroids value."""
 
     print("\n" + "="*60)
@@ -286,7 +280,7 @@ def run_sweep(num_centroids, query_vectors, centroids, centroid_index_gpu,
                 gpu_index.nprobe = min(2048, meta.nlist)
 
             t_search_start = time.perf_counter()
-            distances, indices = gpu_index.search(query_vectors[q:q+1], NUM_DOCS)
+            distances, indices = gpu_index.search(query_vectors[q:q+1], num_docs)
             cuda_sync(persistent_res)
             gpu_search_time = time.perf_counter() - t_search_start
             total_gpu_search_time += gpu_search_time
@@ -308,9 +302,9 @@ def run_sweep(num_centroids, query_vectors, centroids, centroid_index_gpu,
         # Sort by metric: inner-product → descending, L2 → ascending
         metric_type = shard_metas[hit_shard_ids[0]].metric_type
         if metric_type in (faiss.METRIC_INNER_PRODUCT, faiss.METRIC_Jaccard):
-            top_order = np.argsort(-merged_distances)[:NUM_DOCS]
+            top_order = np.argsort(-merged_distances)[:num_docs]
         else:
-            top_order = np.argsort(merged_distances)[:NUM_DOCS]
+            top_order = np.argsort(merged_distances)[:num_docs]
 
         final_docs       = merged_indices[top_order]
         final_scores     = merged_distances[top_order]
@@ -324,7 +318,7 @@ def run_sweep(num_centroids, query_vectors, centroids, centroid_index_gpu,
         print(f"\n  Query {q} | Shards: {hit_shard_ids} | "
               f"Transfer: {total_gpu_transfer_time:.4f}s | "
               f"Search: {total_gpu_search_time:.4f}s")
-        print(f"  Top-{NUM_DOCS} Docs: {final_docs}  Scores: {final_scores}")
+        print(f"  Top-{num_docs} Docs: {final_docs}  Scores: {final_scores}")
 
         analysis_results.append({
             'query':               q,
@@ -344,7 +338,39 @@ def run_sweep(num_centroids, query_vectors, centroids, centroid_index_gpu,
 # ==============================================================
 # Main
 # ==============================================================
+def parse_args():
+    parser = argparse.ArgumentParser(description="Hydra FAISS benchmark with centroid sweep.")
+    parser.add_argument(
+        "--num-queries",
+        type=int,
+        default=1000,
+        help="Number of queries to run (default: 1000)",
+    )
+    parser.add_argument(
+        "--num-docs",
+        type=int,
+        default=10,
+        help="Number of top documents to retrieve per query (default: 10)",
+    )
+    parser.add_argument(
+        "--num-centroids-sweep",
+        type=int,
+        nargs="+",
+        default=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        help="Space-separated list of centroid counts to sweep over (default: 1-10 then 20-100 in steps of 10)",
+    )
+    parser.add_argument(
+        "--index-size",
+        type=int,
+        default=1000,
+        help="Number of original clusters per shard, used to label the output directory (default: 1000)",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
     os.environ["FAISS_GPU_PACKED_LISTS"]          = "1"
     os.environ["FAISS_GPU_PACKED_LISTS_MMAP"]     = "1"
     os.environ["FAISS_GPU_DEVICEVECTOR_CACHE"]    = "1"
@@ -352,7 +378,8 @@ def main():
     os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"]  = "0"
     os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"]    = "0"
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_dir = f"data/hydra_analysis/{args.index_size}_nlist_indices"
+    os.makedirs(output_dir, exist_ok=True)
 
     hydra_shards = discover_shards(SHARDS_DIR, SHARD_GLOB)
     if not hydra_shards:
@@ -360,6 +387,8 @@ def main():
             f"No shard files found in {SHARDS_DIR} matching {SHARD_GLOB}"
         )
     print(f"Found {len(hydra_shards)} shard files.")
+    print(f"Config — queries: {args.num_queries} | docs: {args.num_docs} | "
+          f"centroid sweep: {args.num_centroids_sweep}")
 
     # ------------------------------------------------------------------
     # Phase 1: Load lightweight shard metadata
@@ -390,7 +419,7 @@ def main():
     print("="*60)
 
     queries       = np.load(QUERY_PATH, mmap_mode='r')
-    query_vectors = queries[:NUM_QUERIES].astype('float32')
+    query_vectors = queries[:args.num_queries].astype('float32')
 
     centroids = np.load(CENTROID_LIST).astype('float32')
     d = centroids.shape[1]
@@ -405,10 +434,10 @@ def main():
     # Phase 4: Sweep over NUM_CENTROIDS values
     # ------------------------------------------------------------------
     print("\n" + "="*60)
-    print(f"Starting NUM_CENTROIDS sweep: {NUM_CENTROIDS_SWEEP}")
+    print(f"Starting NUM_CENTROIDS sweep: {args.num_centroids_sweep}")
     print("="*60)
 
-    for num_centroids in NUM_CENTROIDS_SWEEP:
+    for num_centroids in args.num_centroids_sweep:
         results_df = run_sweep(
             num_centroids      = num_centroids,
             query_vectors      = query_vectors,
@@ -420,10 +449,11 @@ def main():
             hydra_shards       = hydra_shards,
             warmup_times       = warmup_times,
             persistent_res     = persistent_res,
+            num_docs           = args.num_docs,
         )
 
         output_file = os.path.join(
-            OUTPUT_DIR, f"hydra_analysis_centroids_{num_centroids}.csv"
+            output_dir, f"hydra_analysis_centroids_{num_centroids}.csv"
         )
         results_df.to_csv(output_file, index=False)
         print(f"\n  ✓ Saved {len(results_df)} rows → {output_file}")
@@ -432,9 +462,9 @@ def main():
     # Phase 5: Summary
     # ------------------------------------------------------------------
     print("\n" + "="*60)
-    print(f"Sweep complete. All results saved to: {OUTPUT_DIR}/")
+    print(f"Sweep complete. All results saved to: {output_dir}/")
     print("  Files written:")
-    for num_centroids in NUM_CENTROIDS_SWEEP:
+    for num_centroids in args.num_centroids_sweep:
         print(f"    hydra_analysis_centroids_{num_centroids}.csv")
     print("="*60)
 
