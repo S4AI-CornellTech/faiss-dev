@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-hydra_benchmark.py  —  RAM-lean version
-----------------------------------------
+hydra_benchmark.py  —  RAM-lean version  (multi-centroid sweep edition)
+------------------------------------------------------------------------
+Sweeps over multiple NUM_CENTROIDS values.  Results for each value are
+written to a separate CSV under:
+
+    fine_grained_hydra_analysis/
+        hydra_analysis_centroids_{N}.csv
+
 Replaces load_cpu_indices() + index_cpu_to_gpu(cpu_indices[shard_id], ...)
 with a stub-based loader that reads GPU codes directly from the packed
 disk cache, keeping zero inverted-list data in CPU RAM.
@@ -39,7 +45,7 @@ except ImportError:
 from gpu_index_loader import load_ivf_gpu_index_from_cache, _read_meta
 
 # ==============================================================
-# Config  (unchanged from original)
+# Config
 # ==============================================================
 SHARDS_DIR      = "/data/indices/hydra/fine/shards"
 SHARD_GLOB      = "hydra_head_*.faiss"
@@ -53,12 +59,16 @@ QUANTIZER_DIR   = "/data/indices/hydra/fine/coarse_quantizers"
 # Packed cache root — one sub-dir per shard
 CACHE_ROOT      = "/data/indices/hydra/fine/hydra_cache_shards"
 
-NUM_QUERIES     = 500
-NUM_CENTROIDS   = 40
-NUM_DOCS        = 10
-WARMUP_RUNS     = 2
-USE_UNIFIED_MEMORY = False
-PINNED_MEM_BYTES   = 2 * 1024 * 1024 * 1024
+NUM_QUERIES          = 1000
+NUM_CENTROIDS_SWEEP  = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100] 
+NUM_CENTROIDS_SWEEP  = [80, 90, 100]
+NUM_DOCS             = 10
+WARMUP_RUNS          = 2
+USE_UNIFIED_MEMORY   = False
+PINNED_MEM_BYTES     = 2 * 1024 * 1024 * 1024
+
+# Output folder for per-sweep CSVs
+OUTPUT_DIR = "../data/fine_grained_hydra_analysis"
 
 # ==============================================================
 # Shard metadata  (replaces cpu_indices[i].nlist / .d / .metric_type)
@@ -98,7 +108,7 @@ class ShardMeta:
 
 
 # ==============================================================
-# Helpers  (identical to original)
+# Helpers
 # ==============================================================
 def discover_shards(shards_dir, shard_glob):
     shard_paths = glob.glob(os.path.join(shards_dir, shard_glob))
@@ -140,7 +150,7 @@ def get_gpu_cloner_options():
 
 
 # ==============================================================
-# Lightweight shard loader  (replaces index_cpu_to_gpu(cpu_indices[i]))
+# Lightweight shard loader
 # ==============================================================
 def load_shard_to_gpu(persistent_res: faiss.GpuResources,
                       meta: ShardMeta,
@@ -163,7 +173,7 @@ def load_shard_to_gpu(persistent_res: faiss.GpuResources,
 
 
 # ==============================================================
-# Warmup  (structure identical to original, but no cpu_indices arg)
+# Warmup
 # ==============================================================
 def warmup_shards(persistent_res, shard_metas, num_warmup_runs, hydra_shards):
     print("\n" + "="*60)
@@ -201,7 +211,7 @@ def warmup_shards(persistent_res, shard_metas, num_warmup_runs, hydra_shards):
 
 
 # ==============================================================
-# Centroid / shard mapping  (unchanged)
+# Centroid / shard mapping
 # ==============================================================
 def get_centroid_to_shard_mapping():
     print("Loading centroid-to-shard mapping...")
@@ -230,73 +240,21 @@ def analyze_shard_hits_per_query(query_idx, centroid_ids,
 
 
 # ==============================================================
-# Main
+# Single-centroid-value sweep run
 # ==============================================================
-def main():
-    os.environ["FAISS_GPU_PACKED_LISTS"]          = "1"
-    os.environ["FAISS_GPU_PACKED_LISTS_MMAP"]     = "1"
-    os.environ["FAISS_GPU_DEVICEVECTOR_CACHE"]    = "1"
-    os.environ["FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES"] = str(1 << 30)
-    os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"]  = "0"
-    os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"]    = "0"
+def run_sweep(num_centroids, query_vectors, centroids, centroid_index_gpu,
+              centroid_to_shard, num_shards, shard_metas, hydra_shards,
+              warmup_times, persistent_res):
+    """Run the full per-query retrieval for a single num_centroids value."""
 
-    hydra_shards = discover_shards(SHARDS_DIR, SHARD_GLOB)
-    if not hydra_shards:
-        raise FileNotFoundError(
-            f"No shard files found in {SHARDS_DIR} matching {SHARD_GLOB}"
-        )
-    print(f"Found {len(hydra_shards)} shard files.")
-
-    # ------------------------------------------------------------------
-    # Phase 1: Load lightweight shard metadata (replaces load_cpu_indices)
-    # ------------------------------------------------------------------
     print("\n" + "="*60)
-    print("Loading Shard Metadata  (coarse quantizers only — no inverted lists)")
+    print(f"Sweep: NUM_CENTROIDS = {num_centroids}")
     print("="*60)
 
-    shard_metas = []
-    for shard_idx in range(len(hydra_shards)):
-        meta = ShardMeta(shard_idx)
-        shard_metas.append(meta)
-        print(f"  Shard {shard_idx}: nlist={meta.nlist} d={meta.d} "
-              f"ntotal={meta.ntotal:,} code_size={meta.code_size}")
+    similarities, centroid_ids = centroid_index_gpu.search(query_vectors, num_centroids)
 
-    persistent_res = get_gpu_resources()
-
-    # ------------------------------------------------------------------
-    # Phase 2: Warmup (writes packed cache on first run if missing)
-    # ------------------------------------------------------------------
-    warmup_times = warmup_shards(persistent_res, shard_metas, WARMUP_RUNS, hydra_shards)
-
-    # ------------------------------------------------------------------
-    # Phase 3: Centroid analysis
-    # ------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("Loading Queries & Centroids")
-    print("="*60)
-
-    queries       = np.load(QUERY_PATH, mmap_mode='r')
-    query_vectors = queries[:NUM_QUERIES].astype('float32')
-
-    centroids = np.load(CENTROID_LIST).astype('float32')
-    d = centroids.shape[1]
-
-    centroid_index_cpu = faiss.IndexFlatL2(d)
-    centroid_index_gpu = faiss.index_cpu_to_gpu(persistent_res, 0, centroid_index_cpu)
-    centroid_index_gpu.add(centroids)
-
-    similarities, centroid_ids = centroid_index_gpu.search(query_vectors, NUM_CENTROIDS)
-
-    centroid_to_shard, num_shards = get_centroid_to_shard_mapping()
     retrieved_ids_gpu = torch.tensor(centroid_ids, device="cuda", dtype=torch.long)
     retrieved_shards  = centroid_to_shard[retrieved_ids_gpu]
-
-    # ------------------------------------------------------------------
-    # Phase 4: Per-query retrieval
-    # ------------------------------------------------------------------
-    print("\n" + "="*60)
-    print(f"Per-Query Analysis (top-{NUM_CENTROIDS} centroids)")
-    print("="*60)
 
     analysis_results = []
 
@@ -306,7 +264,7 @@ def main():
         )
 
         if not hit_shard_ids:
-            print("\n  No valid shard hits found; skipping query.")
+            print(f"\n  Query {q}: No valid shard hits found; skipping.")
             continue
 
         merged_distances = []
@@ -363,16 +321,14 @@ def main():
             for sid in hit_shard_ids if warmup_times[sid]
         ]) if hit_shard_ids else 0.0
 
-        print(f"\n  Searched Shards: {hit_shard_ids}")
-        print(f"  GPU Transfer (total): {total_gpu_transfer_time:.6f}s | "
-              f"GPU Search (total): {total_gpu_search_time:.6f}s")
-        print(f"  Avg Warmup Time (hit shards): {avg_warmup_time:.6f}s")
-        print(f"  Top-{NUM_DOCS} Docs    (merged): {final_docs}")
-        print(f"  Top-{NUM_DOCS} Scores  (merged): {final_scores}")
-        print(f"  Top-{NUM_DOCS} Shards  (merged): {final_doc_shards}")
+        print(f"\n  Query {q} | Shards: {hit_shard_ids} | "
+              f"Transfer: {total_gpu_transfer_time:.4f}s | "
+              f"Search: {total_gpu_search_time:.4f}s")
+        print(f"  Top-{NUM_DOCS} Docs: {final_docs}  Scores: {final_scores}")
 
         analysis_results.append({
             'query':               q,
+            'num_centroids':       num_centroids,
             'searched_shard_ids':  str(hit_shard_ids),
             'num_searched_shards': len(hit_shard_ids),
             'gpu_transfer_time':   total_gpu_transfer_time,
@@ -382,17 +338,105 @@ def main():
             'top_doc_shards':      str(final_doc_shards.tolist()),
         })
 
-    # ------------------------------------------------------------------
-    # Phase 5: Save results
-    # ------------------------------------------------------------------
-    output_file = "../data/fine_grained_hydra_analysis.csv"
-    results_df  = pd.DataFrame(analysis_results)
-    results_df.to_csv(output_file, index=False)
+    return pd.DataFrame(analysis_results)
 
+
+# ==============================================================
+# Main
+# ==============================================================
+def main():
+    os.environ["FAISS_GPU_PACKED_LISTS"]          = "1"
+    os.environ["FAISS_GPU_PACKED_LISTS_MMAP"]     = "1"
+    os.environ["FAISS_GPU_DEVICEVECTOR_CACHE"]    = "1"
+    os.environ["FAISS_GPU_DEVICEVECTOR_CACHE_MIN_BYTES"] = str(1 << 30)
+    os.environ["FAISS_GPU_PACKED_LISTS_PROFILE"]  = "0"
+    os.environ["FAISS_GPU_PACKED_LISTS_DEBUG"]    = "0"
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    hydra_shards = discover_shards(SHARDS_DIR, SHARD_GLOB)
+    if not hydra_shards:
+        raise FileNotFoundError(
+            f"No shard files found in {SHARDS_DIR} matching {SHARD_GLOB}"
+        )
+    print(f"Found {len(hydra_shards)} shard files.")
+
+    # ------------------------------------------------------------------
+    # Phase 1: Load lightweight shard metadata
+    # ------------------------------------------------------------------
     print("\n" + "="*60)
-    print(f"Results saved to {output_file}")
+    print("Loading Shard Metadata  (coarse quantizers only — no inverted lists)")
     print("="*60)
-    print(results_df.to_string(index=False))
+
+    shard_metas = []
+    for shard_idx in range(len(hydra_shards)):
+        meta = ShardMeta(shard_idx)
+        shard_metas.append(meta)
+        print(f"  Shard {shard_idx}: nlist={meta.nlist} d={meta.d} "
+              f"ntotal={meta.ntotal:,} code_size={meta.code_size}")
+
+    persistent_res = get_gpu_resources()
+
+    # ------------------------------------------------------------------
+    # Phase 2: Warmup (writes packed cache on first run if missing)
+    # ------------------------------------------------------------------
+    warmup_times = warmup_shards(persistent_res, shard_metas, WARMUP_RUNS, hydra_shards)
+
+    # ------------------------------------------------------------------
+    # Phase 3: Load queries & build centroid index ONCE (shared across sweep)
+    # ------------------------------------------------------------------
+    print("\n" + "="*60)
+    print("Loading Queries & Centroids")
+    print("="*60)
+
+    queries       = np.load(QUERY_PATH, mmap_mode='r')
+    query_vectors = queries[:NUM_QUERIES].astype('float32')
+
+    centroids = np.load(CENTROID_LIST).astype('float32')
+    d = centroids.shape[1]
+
+    centroid_index_cpu = faiss.IndexFlatL2(d)
+    centroid_index_gpu = faiss.index_cpu_to_gpu(persistent_res, 0, centroid_index_cpu)
+    centroid_index_gpu.add(centroids)
+
+    centroid_to_shard, num_shards = get_centroid_to_shard_mapping()
+
+    # ------------------------------------------------------------------
+    # Phase 4: Sweep over NUM_CENTROIDS values
+    # ------------------------------------------------------------------
+    print("\n" + "="*60)
+    print(f"Starting NUM_CENTROIDS sweep: {NUM_CENTROIDS_SWEEP}")
+    print("="*60)
+
+    for num_centroids in NUM_CENTROIDS_SWEEP:
+        results_df = run_sweep(
+            num_centroids      = num_centroids,
+            query_vectors      = query_vectors,
+            centroids          = centroids,
+            centroid_index_gpu = centroid_index_gpu,
+            centroid_to_shard  = centroid_to_shard,
+            num_shards         = num_shards,
+            shard_metas        = shard_metas,
+            hydra_shards       = hydra_shards,
+            warmup_times       = warmup_times,
+            persistent_res     = persistent_res,
+        )
+
+        output_file = os.path.join(
+            OUTPUT_DIR, f"hydra_analysis_centroids_{num_centroids}.csv"
+        )
+        results_df.to_csv(output_file, index=False)
+        print(f"\n  ✓ Saved {len(results_df)} rows → {output_file}")
+
+    # ------------------------------------------------------------------
+    # Phase 5: Summary
+    # ------------------------------------------------------------------
+    print("\n" + "="*60)
+    print(f"Sweep complete. All results saved to: {OUTPUT_DIR}/")
+    print("  Files written:")
+    for num_centroids in NUM_CENTROIDS_SWEEP:
+        print(f"    hydra_analysis_centroids_{num_centroids}.csv")
+    print("="*60)
 
     del persistent_res
     clear_gpu_memory()
