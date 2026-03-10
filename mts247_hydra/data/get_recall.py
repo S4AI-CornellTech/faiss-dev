@@ -272,7 +272,7 @@ def main() -> None:
     parser.add_argument("--monolithic", default="hydra_baseline_bs_1.csv")
     parser.add_argument(
         "--fine-grained-hydra-dir",
-        default="hydra_analysis/100_nlist_indices",
+        default="hydra_analysis/10_nlist_indices",
         help="Directory containing hydra_analysis_centroids_<N>.csv files",
     )
     parser.add_argument("--output-per-query-prefix", default="")

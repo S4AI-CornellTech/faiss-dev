@@ -50,7 +50,7 @@ from gpu_index_loader import load_ivf_gpu_index_from_cache, _read_meta
 # ==============================================================
 SHARDS_DIR      = "/data/indices/hydra/shards"
 SHARD_GLOB      = "hydra_head_*.faiss"
-QUERY_PATH      = "../triviaqa_encodings.npy"
+QUERY_PATH      = "triviaqa_encodings.npy"
 CENTROID_LIST   = "/data/indices/hydra/hydra_centroids.npy"
 CENTROID_LOOKUP = "/data/indices/hydra/centroid_to_shard_map.csv"
 
