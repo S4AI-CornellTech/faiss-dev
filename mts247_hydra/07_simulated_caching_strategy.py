@@ -17,13 +17,18 @@ def get_shard_data(directory):
             shards.append({'name': f, 'id': s_id, 'bytes': os.path.getsize(path)})
     return sorted(shards, key=lambda x: x['bytes'], reverse=True)
 
-def run_simulation(shard_dir, csv_path):
+def natural_sort_key(s):
+    """Key for natural sorting: 'centroids_2' comes before 'centroids_10'."""
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split('([0-9]+)', s)]
+
+def run_batch_simulation(shard_dir, input_folder, output_csv):
     shards = get_shard_data(shard_dir)
     if not shards:
         print(f"Error: No shards found in {shard_dir}")
         return
 
-    # --- 1. THE TABLE (Balancing Logic) ---
+    # --- 1. TABLE MAPPING ---
     num_cols, max_gb = 4, 95
     n = len(shards)
     num_rows = math.ceil(n / num_cols)
@@ -37,104 +42,103 @@ def run_simulation(shard_dir, csv_path):
         if valid_config: break
         num_rows += 1
 
-    print(f"\n{'Col 1':<30} | {'Col 2':<30} | {'Col 3':<30} | {'Col 4':<30}")
-    print("-" * 130)
-
     shard_to_col = {}
     for r in range(num_rows):
-        row_cells = []
         for c in range(num_cols):
             idx = (c * num_rows) + r
             if idx < n:
-                s = shards[idx]
-                shard_to_col[s['id']] = c
-                label = f"{s['name']} ({s['bytes']/(1024**3):.1f}G)"
-                row_cells.append(f"{label:<30}")
-            else:
-                row_cells.append(f"{' ':<30}")
-        print(" | ".join(row_cells))
+                shard_to_col[shards[idx]['id']] = c
 
-    # --- 2. SHARD-LEVEL CACHE SIMULATION ---
-    cache_slots = [None] * num_cols
-    hits, compulsory, conflict, total_shard_lookups = 0, 0, 0, 0
+    # --- 2. BATCH PROCESSING ---
+    os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+    summary_results = []
+
+    if not os.path.exists(input_folder):
+        print(f"Error: Input folder {input_folder} not found.")
+        return
+
+    # Sort files naturally (1, 2, 3... instead of 1, 10, 11)
+    csv_files = [f for f in os.listdir(input_folder) if f.endswith('.csv')]
+    csv_files.sort(key=natural_sort_key)
     
-    total_original_latency = 0.0
-    total_actual_latency = 0.0
-    total_saved_transfer_time = 0.0
-    query_count = 0
+    print(f"Processing {len(csv_files)} files in numerical order...\n")
 
-    try:
-        with open(csv_path, mode='r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                query_count += 1
-                raw_ids = row['searched_shard_ids']
-                try:
-                    searched_ids = ast.literal_eval(raw_ids)
-                    if isinstance(searched_ids, int): searched_ids = [searched_ids]
-                except:
-                    searched_ids = [int(x) for x in re.findall(r'\d+', raw_ids)]
-
-                num_shards_in_query = len(searched_ids)
-                if num_shards_in_query == 0: continue
-
-                t_transfer = float(row.get('gpu_transfer_time', 0))
-                t_search = float(row.get('gpu_search_time', 0))
-                
-                # Metric 1: Pure CSV Baseline
-                total_original_latency += (t_transfer + t_search)
-
-                # Proportional costs per shard for granular evaluation
-                t_transfer_per_shard = t_transfer / num_shards_in_query
-                t_search_per_shard = t_search / num_shards_in_query
-
-                for s_id in searched_ids:
-                    total_shard_lookups += 1
-                    if s_id not in shard_to_col:
-                        total_actual_latency += (t_transfer_per_shard + t_search_per_shard)
-                        continue
-
-                    col_idx = shard_to_col[s_id]
-                    resident = cache_slots[col_idx]
-
-                    if resident == s_id:
-                        hits += 1
-                        # HIT: Transfer time is saved
-                        total_actual_latency += t_search_per_shard
-                        total_saved_transfer_time += t_transfer_per_shard
-                    else:
-                        # MISS: Add both search and transfer
-                        if resident is None: compulsory += 1
-                        else: conflict += 1
-                        
-                        total_actual_latency += (t_transfer_per_shard + t_search_per_shard)
-                        cache_slots[col_idx] = s_id
-
-        print(f"\n--- Performance Analysis (1 Row per Column) ---")
-        print(f"Trace File:          {csv_path}")
-        print(f"Total Shard Lookups: {total_shard_lookups}")
-        print(f"Total Hits:          {hits}")
-        print(f"Compulsory Misses:   {compulsory}")
-        print(f"Conflict Misses:     {conflict}")
+    for filename in csv_files:
+        csv_path = os.path.join(input_folder, filename)
+        cache_slots = [None] * num_cols
         
-        if query_count > 0:
-            hit_rate = (hits / total_shard_lookups) * 100 if total_shard_lookups > 0 else 0
-            avg_orig = total_original_latency / query_count
-            avg_actual = total_actual_latency / query_count
-            avg_saved = total_saved_transfer_time / query_count
-            
-            print(f"Shard Hit Rate:      {hit_rate:.2f}%")
-            print("-" * 50)
-            print(f"Avg Original Latency: {avg_orig:.6f}s (Baseline)")
-            print(f"Avg Actual Latency:   {avg_actual:.6f}s (With Caching)")
-            print(f"Avg Time Saved:       {avg_saved:.6f}s per query")
-            print("-" * 50)
-            print(f"Total Trace Savings:  {total_saved_transfer_time:.4f}s")
+        hits, total_shard_lookups = 0, 0
+        total_orig_lat = 0.0
+        total_actual_lat = 0.0
+        total_saved_time = 0.0
+        query_count = 0
 
-    except FileNotFoundError:
-        print(f"\nError: CSV trace '{csv_path}' not found.")
+        try:
+            with open(csv_path, mode='r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    query_count += 1
+                    raw_ids = row['searched_shard_ids']
+                    try:
+                        s_ids = ast.literal_eval(raw_ids)
+                        if isinstance(s_ids, int): s_ids = [s_ids]
+                    except:
+                        s_ids = [int(x) for x in re.findall(r'\d+', raw_ids)]
+
+                    num_shards = len(s_ids)
+                    if num_shards == 0: continue
+
+                    t_trans = float(row.get('gpu_transfer_time', 0))
+                    t_srch = float(row.get('gpu_search_time', 0))
+                    
+                    total_orig_lat += (t_trans + t_srch)
+                    t_trans_shard = t_trans / num_shards
+                    t_srch_shard = t_srch / num_shards
+
+                    for s_id in s_ids:
+                        total_shard_lookups += 1
+                        col_idx = shard_to_col.get(s_id)
+                        
+                        if col_idx is None:
+                            total_actual_lat += (t_trans_shard + t_srch_shard)
+                            continue
+
+                        if cache_slots[col_idx] == s_id:
+                            hits += 1
+                            total_actual_lat += t_srch_shard
+                            total_saved_time += t_trans_shard
+                        else:
+                            total_actual_lat += (t_trans_shard + t_srch_shard)
+                            cache_slots[col_idx] = s_id
+
+            if query_count > 0:
+                res = {
+                    'filename': filename,
+                    'queries': query_count,
+                    'hit_rate': (hits / total_shard_lookups * 100),
+                    'avg_orig_lat': total_orig_lat / query_count,
+                    'avg_actual_lat': total_actual_lat / query_count,
+                    'avg_time_saved': total_saved_time / query_count,
+                    'total_time_saved': total_saved_time
+                }
+                summary_results.append(res)
+                print(f"Done: {filename:<35} | Hit Rate: {res['hit_rate']:>6.2f}%")
+
+        except Exception as e:
+            print(f"Error on {filename}: {e}")
+
+    # --- 3. SAVE SUMMARY ---
+    with open(output_csv, mode='w', newline='') as f:
+        fields = ['filename', 'queries', 'hit_rate', 'avg_orig_lat', 'avg_actual_lat', 'avg_time_saved', 'total_time_saved']
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(summary_results)
+    
+    print(f"\nFinal summary written to: {output_csv}")
 
 if __name__ == "__main__":
     SHARD_DIR = "/data/indices/hydra/shards/"
-    trace_file = sys.argv[1] if len(sys.argv) > 1 else "data/hydra_analysis/1000_nlist_indices/hydra_analysis_centroids_10.csv"
-    run_simulation(SHARD_DIR, trace_file)
+    INPUT_DIR = "data/hydra_analysis/1000_nlist_indices/"
+    OUTPUT_FILE = "data/cache_simulation_summary.csv"
+    
+    run_batch_simulation(SHARD_DIR, INPUT_DIR, OUTPUT_FILE)
