@@ -1,0 +1,2 @@
+index_size,nprobe,batch_size,retrieved_docs,avg_query_time
+50m,256,32,5,0.06357469868659973
