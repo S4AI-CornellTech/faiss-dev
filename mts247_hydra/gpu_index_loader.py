@@ -74,7 +74,6 @@ def _read_meta(meta_path: str, expected_nlist: int):
 
 
 def _verify_cache_files(cache_dir: str, total_gpu_bytes: int) -> None:
-    """Raise RuntimeError if the codes file is missing or the wrong size."""
     codes_path = os.path.join(cache_dir, "gpu_codes_all.bin")
     if not os.path.exists(codes_path):
         raise RuntimeError(

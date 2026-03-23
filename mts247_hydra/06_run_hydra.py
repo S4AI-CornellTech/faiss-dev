@@ -1,29 +1,4 @@
 #!/usr/bin/env python3
-"""
-hydra_benchmark.py  —  RAM-lean version  (multi-centroid sweep edition)
-------------------------------------------------------------------------
-Sweeps over multiple NUM_CENTROIDS values.  Results for each value are
-written to a separate CSV under:
-
-    fine_grained_hydra_analysis/
-        hydra_analysis_centroids_{N}.csv
-
-Replaces load_cpu_indices() + index_cpu_to_gpu(cpu_indices[shard_id], ...)
-with a stub-based loader that reads GPU codes directly from the packed
-disk cache, keeping zero inverted-list data in CPU RAM.
-
-RAM budget (per shard, new vs old):
-  OLD:  full CPU index  ~nlist * avg_list_size * code_size  (can be tens of GB total)
-  NEW:  coarse quantizer only  ~nlist * d * 4 bytes  (a few hundred MB total)
-
-Prerequisites
--------------
-1. Run save_coarse_quantizers.py ONCE to extract centroid files.
-2. The packed cache (gpu_codes_all.bin / .meta) must already exist for
-   each shard under hydra_cache_shards/hydra_shard_<N>/.
-   It is written on the first (warmup) run via the normal slow path,
-   so run warmup once with the old script before switching to this one.
-"""
 
 import os
 import time

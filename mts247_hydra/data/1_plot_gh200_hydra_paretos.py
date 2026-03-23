@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Tuple
 # --- Config ---
 GROUND_TRUTH_PATH = "hydra_monolithic_ground_truth.csv"
 MONOLITHIC_PATH = "hydra_baseline_bs_1.csv"
-HYDRA_ROOT_DIR = "hydra_analysis"
+HYDRA_ROOT_DIR = "gh200_hydra_analysis"
 OUTPUT_PER_QUERY_PREFIX = ""
 PARETO_OUTPUT = "pareto_accuracy_latency.png"
 STACKED_BAR_OUTPUT = "stacked_bar_latency_nlists_1000.png"
@@ -242,7 +242,13 @@ def plot_pareto_accuracy_latency(
     colors = ["#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F"]
     fig, ax = plt.subplots(figsize=(7, 4), dpi=300)
 
-    for i, (name, summaries) in enumerate(sweep_groups):
+    def nlist_sort_key(name: str) -> float:
+        m = re.search(r"(\d+)_nlist_indices", name)
+        return float(m.group(1)) if m else float("inf")
+
+    ordered_sweep_groups = sorted(sweep_groups, key=lambda group: nlist_sort_key(group[0]))
+
+    for i, (name, summaries) in enumerate(ordered_sweep_groups):
         ordered = sorted(summaries, key=lambda x: x["avg_latency"])
         x = [s["avg_latency"] for s in ordered]
         y = [s["avg_recall"] for s in ordered]
@@ -264,7 +270,20 @@ def plot_pareto_accuracy_latency(
     ax.set_xlabel("Latency (Seconds)", fontsize=14, labelpad=15, fontweight="300")
     ax.set_ylabel("Recall Accuracy", fontsize=14, labelpad=15, fontweight="300")
 
-    legend = ax.legend(loc="lower right", frameon=False, fontsize=11, handletextpad=0.5)
+    handles, labels = ax.get_legend_handles_labels()
+    non_baseline = [(h, l) for h, l in zip(handles, labels) if l != "Monolithic Baseline"]
+    baseline = [(h, l) for h, l in zip(handles, labels) if l == "Monolithic Baseline"]
+    non_baseline.sort(key=lambda item: nlist_sort_key(item[1]))
+    legend_items = non_baseline + baseline
+
+    legend = ax.legend(
+        [h for h, _ in legend_items],
+        [l for _, l in legend_items],
+        loc="lower right",
+        frameon=False,
+        fontsize=11,
+        handletextpad=0.5,
+    )
     for t in legend.get_texts():
         t.set_color("#444444")
 
