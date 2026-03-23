@@ -12,8 +12,8 @@ GROUND_TRUTH_PATH = "hydra_monolithic_ground_truth.csv"
 MONOLITHIC_PATH = "hydra_baseline_bs_1.csv"
 HYDRA_ROOT_DIR = "gh200_hydra_analysis"
 OUTPUT_PER_QUERY_PREFIX = ""
-PARETO_OUTPUT = "pareto_accuracy_latency.png"
-STACKED_BAR_OUTPUT = "stacked_bar_latency_nlists_1000.png"
+PARETO_OUTPUT = "1_pareto_accuracy_latency.png"
+STACKED_BAR_OUTPUT = "1_stacked_bar_latency_nlists_1000.png"
 STACKED_BAR_FOLDER = "1000_nlist_indices"
 
 

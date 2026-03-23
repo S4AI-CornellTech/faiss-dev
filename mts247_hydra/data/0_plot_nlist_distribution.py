@@ -8,7 +8,7 @@ import numpy as np
 def main():
     data = "nlist_sizes.csv"
     bins = 200
-    plot_name = "plot_nlist_distribution.png"
+    plot_name = "0_plot_nlist_distribution.png"
 
     # ---- Constants ----
     DIM = 768

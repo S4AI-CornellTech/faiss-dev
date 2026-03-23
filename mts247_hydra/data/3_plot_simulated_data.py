@@ -5,7 +5,7 @@ import os
 
 # --- 1. Load and Clean Data ---
 # Update this path if your CSV is in a different subdirectory
-csv_path = 'cache_simulation_summary.csv'
+csv_path = '3_cache_simulation_summary.csv'
 
 if not os.path.exists(csv_path):
     # Try searching in 'data/' if not in root
@@ -97,6 +97,6 @@ for ax in [ax1, ax2]:
         text.set_color("#444444")
 
 plt.tight_layout()
-output_name = 'simulated_caching_data.png'
+output_name = '3_simulated_caching_data.png'
 plt.savefig(output_name, bbox_inches="tight")
 print(f"Successfully generated: {output_name}")

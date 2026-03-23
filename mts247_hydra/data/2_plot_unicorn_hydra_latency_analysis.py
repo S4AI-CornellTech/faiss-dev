@@ -8,7 +8,7 @@ import re
 from typing import Dict, List, Tuple
 
 
-DEFAULT_OUTPUT = "unicorn_hydra_latency_100_nlist.png"
+DEFAULT_OUTPUT = "2_unicorn_hydra_latency_100_nlist.png"
 
 
 def parse_float(raw: str) -> float:
