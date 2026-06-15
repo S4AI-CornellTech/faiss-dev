@@ -281,6 +281,44 @@ std::vector<idx_t> GpuIndexIVF::getListIndices(idx_t listId) const {
     return baseIndex_->getListIndices(listId);
 }
 
+void GpuIndexIVF::loadPackedListsFromDevice(
+        int64_t codesDevPtr,
+        int64_t totalCodeBytes,
+        int64_t indicesDevPtr,
+        int64_t totalIndexBytes,
+        const std::vector<int64_t>& listSizes,
+        const std::vector<int64_t>& listCodeByteOffsets,
+        const std::vector<int64_t>& listIndexByteOffsets) {
+    DeviceScope scope(config_.device);
+    FAISS_ASSERT(baseIndex_);
+    FAISS_THROW_IF_NOT_MSG(
+            is_trained,
+            "Index must be trained before loading packed lists from device");
+    FAISS_THROW_IF_NOT_MSG(
+            (idx_t)listSizes.size() == nlist,
+            "listSizes length must equal nlist");
+
+    std::vector<idx_t> sizes(listSizes.begin(), listSizes.end());
+    std::vector<size_t> codeOffsets(
+            listCodeByteOffsets.begin(), listCodeByteOffsets.end());
+    std::vector<size_t> indexOffsets(
+            listIndexByteOffsets.begin(), listIndexByteOffsets.end());
+
+    baseIndex_->copyInvertedListsFromDevice(
+            reinterpret_cast<const uint8_t*>(codesDevPtr),
+            static_cast<size_t>(totalCodeBytes),
+            reinterpret_cast<const uint8_t*>(indicesDevPtr),
+            static_cast<size_t>(totalIndexBytes),
+            sizes,
+            codeOffsets,
+            indexOffsets);
+
+    ntotal = 0;
+    for (auto s : listSizes) {
+        ntotal += s;
+    }
+}
+
 void GpuIndexIVF::addImpl_(idx_t n, const float* x, const idx_t* xids) {
     // Device is already set in GpuIndex::add
     FAISS_ASSERT(baseIndex_);

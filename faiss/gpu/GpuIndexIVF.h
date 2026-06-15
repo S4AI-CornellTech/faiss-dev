@@ -98,6 +98,29 @@ class GpuIndexIVF : public GpuIndex, public IndexIVFInterface {
     /// debugging purposes.
     virtual std::vector<idx_t> getListIndices(idx_t listId) const;
 
+    /// Zero-copy load from GPU-resident buffers.
+    ///
+    /// codesDevPtr / indicesDevPtr are CUDA device pointers cast to int64_t
+    /// so Python can pass tensor.data_ptr() directly.  The caller retains
+    /// ownership and must keep both allocations alive for the lifetime of
+    /// this index.
+    ///
+    /// Before calling this, create the GPU index structure (quantizer + PQ
+    /// codebooks) via index_cpu_to_gpu with FAISS_GPU_PACKED_SKIP_COPY=1 so
+    /// that the inverted-list upload step is skipped.
+    ///
+    /// listCodeByteOffsets[i] / listIndexByteOffsets[i] are byte offsets into
+    /// the respective flat device buffers where list i begins (matching the
+    /// layout from gpu_codes_all.meta).
+    void loadPackedListsFromDevice(
+            int64_t codesDevPtr,
+            int64_t totalCodeBytes,
+            int64_t indicesDevPtr,
+            int64_t totalIndexBytes,
+            const std::vector<int64_t>& listSizes,
+            const std::vector<int64_t>& listCodeByteOffsets,
+            const std::vector<int64_t>& listIndexByteOffsets);
+
     void search_preassigned(
             idx_t n,
             const float* x,

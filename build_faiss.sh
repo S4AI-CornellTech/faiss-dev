@@ -8,7 +8,7 @@ echo "======================================"
 cmake -B build \
   -DFAISS_ENABLE_GPU=ON \
   -DBUILD_TESTING=OFF \
-  -DCMAKE_CUDA_ARCHITECTURES=90 \
+  -DCMAKE_CUDA_ARCHITECTURES=89 \
   -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
   -DCMAKE_BUILD_TYPE=Release
 

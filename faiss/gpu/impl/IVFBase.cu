@@ -747,6 +747,13 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
         return;
     }
 
+    // When set, skip the CPU→GPU upload entirely.  The caller will inject
+    // device-resident data via copyInvertedListsFromDevice() afterwards.
+    const char* skipEnv = std::getenv("FAISS_GPU_PACKED_SKIP_COPY");
+    if (skipEnv && std::string(skipEnv) == "1") {
+        return;
+    }
+
     const char* cachePathEnv = std::getenv("FAISS_GPU_PACKED_CACHE_PATH");
     const std::string cachePath = cachePathEnv ? std::string(cachePathEnv) : "/dev/shm";
     
@@ -1314,6 +1321,71 @@ void IVFBase::copyInvertedListsFrom(const InvertedLists* ivf) {
             }
         }
     }
+}
+
+void IVFBase::copyInvertedListsFromDevice(
+        const uint8_t* codesDevPtr,
+        size_t totalCodeBytes,
+        const uint8_t* indicesDevPtr,
+        size_t totalIndexBytes,
+        const std::vector<idx_t>& listSizes,
+        const std::vector<size_t>& listCodeOffsets,
+        const std::vector<size_t>& listIndexOffsets) {
+    FAISS_ASSERT((idx_t)listSizes.size() == numLists_);
+    FAISS_ASSERT(listCodeOffsets.size() == (size_t)numLists_);
+    FAISS_ASSERT(listIndexOffsets.size() == (size_t)numLists_);
+
+    // Reset state; leave packedListData_/packedListIndices_ empty —
+    // we alias the caller's device memory instead of allocating our own.
+    reset(true);
+
+    auto stream = resources_->getDefaultStreamCurrentDevice();
+
+    std::vector<void*> hostDataPtrs(numLists_, nullptr);
+    std::vector<void*> hostIndexPtrs(numLists_, nullptr);
+    std::vector<idx_t> hostLengths(numLists_, 0);
+
+    maxListLength_ = 0;
+    for (idx_t i = 0; i < numLists_; ++i) {
+        idx_t sz = listSizes[i];
+        hostLengths[i] = sz;
+        if (sz == 0) {
+            continue;
+        }
+
+        hostDataPtrs[i] =
+                const_cast<uint8_t*>(codesDevPtr) + listCodeOffsets[i];
+
+        if (indicesDevPtr &&
+            (indicesOptions_ == INDICES_32_BIT ||
+             indicesOptions_ == INDICES_64_BIT)) {
+            hostIndexPtrs[i] =
+                    const_cast<uint8_t*>(indicesDevPtr) + listIndexOffsets[i];
+        }
+
+        deviceListData_[i]->numVecs = sz;
+        deviceListIndices_[i]->numVecs = sz;
+
+        if (sz > maxListLength_) {
+            maxListLength_ = sz;
+        }
+    }
+
+    batchUpdatePointers(
+            deviceListDataPointers_,
+            deviceListIndexPointers_,
+            deviceListLengths_,
+            hostDataPtrs,
+            hostIndexPtrs,
+            hostLengths,
+            numLists_,
+            stream);
+
+    packedLists_            = true;
+    packedListCodeOffsets_  = listCodeOffsets;
+    packedListIndexOffsets_ = listIndexOffsets;
+
+    CUDA_VERIFY(cudaStreamSynchronize(stream));
 }
 
 void IVFBase::copyInvertedListsTo(InvertedLists* ivf) {

@@ -76,6 +76,20 @@ class IVFBase {
     /// Copy all inverted lists from a CPU representation to ourselves
     virtual void copyInvertedListsFrom(const InvertedLists* ivf);
 
+    /// Zero-copy load: set per-list GPU pointers to point directly into
+    /// caller-owned device buffers (codesDevPtr / indicesDevPtr).
+    /// The caller retains ownership and must keep both allocations alive for
+    /// the lifetime of this index.  listCodeOffsets[i] / listIndexOffsets[i]
+    /// are byte offsets into the respective flat buffers.
+    virtual void copyInvertedListsFromDevice(
+            const uint8_t* codesDevPtr,
+            size_t totalCodeBytes,
+            const uint8_t* indicesDevPtr,
+            size_t totalIndexBytes,
+            const std::vector<idx_t>& listSizes,
+            const std::vector<size_t>& listCodeOffsets,
+            const std::vector<size_t>& listIndexOffsets);
+
     /// Copy all inverted lists from ourselves to a CPU representation
     virtual void copyInvertedListsTo(InvertedLists* ivf);
 
